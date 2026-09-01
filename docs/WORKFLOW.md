@@ -21,6 +21,8 @@ Windows 执行 `grasp/scripts/start_tmr_system.ps1`，按顺序启动底盘、ZE
 
 路线使用本次启动时冻结的 `mission_start` 和本轮识别出的门框，不依赖历史地图原点或示例图片像素。实时双雷达是硬保护，OccupancyGrid 是二级扫掠证据；只有适配器拥有控制器速度发布权。
 
+从确认的门后停止点退回门前 `1.0 m` 使用 `base/scripts/08_reverse_to_predoor.py`。正常入口在门后约 `0.70 m`，因此默认里程计闭环后退 `1.70 m`；脚本通过独占任务速度通道运行，并持续检查双雷达车尾制动区域。2026-09-01 实机结果为后退 `1.6767 m`、名义门前距离 `0.9767 m`、航向误差约 `0.009°`。
+
 ## 3. 左臂杯子抓取
 
 入口：`grasp/scripts/run_streamed_live_pick_cycle.py`。
@@ -45,4 +47,3 @@ Windows 执行 `grasp/scripts/start_tmr_system.ps1`，按顺序启动底盘、ZE
 - 手眼标定：`grasp/config/left_hand_eye_calibrated.yaml` 与 `grasp/calibration/`。
 
 调整场地参数时，优先重新测量固定起点、整机外廓、门宽和桌面高度；不要通过无限放大阈值来掩盖错误坐标或错误相机。
-

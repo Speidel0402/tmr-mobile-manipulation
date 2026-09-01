@@ -1,0 +1,14 @@
+left_ik_client:
+  ros__parameters:
+    ik_service: /left_ik/compute_ik
+    joint_state_topic: /left/franka_robot_state_broadcaster/measured_joint_states
+    moveit_joint_state_topic: /left_ik/joint_states
+    target_pose_topic: /rim_grasp/left/contact_pose
+    joint_target_topic: /rim_grasp/left/ik_joint_target
+    result_topic: /rim_grasp/left/ik_result_json
+    group_name: left_arm
+    ik_link_name: left_fr3v2_link8
+    timeout_s: 0.2
+    # This node is an IK self-check. Collision checking remains off until a
+    # verified planning scene and complete robot state are available.
+    avoid_collisions: false

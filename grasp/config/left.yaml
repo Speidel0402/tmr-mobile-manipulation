@@ -1,0 +1,66 @@
+camera_id: left
+# Current TF contains only the camera-internal chain. Keep output in the color
+# optical frame until a measured left-arm hand-eye chain is available.
+common_frame: ""
+camera_optical_frame: wrist_camera_left_color_optical_frame
+end_effector_frame: ""
+require_common_frame_tf: false
+depth_is_aligned_to_rgb: false
+publish_markers: true
+topics:
+  # Names read from the currently active left D405 node.
+  rgb: /wrist_camera_left/color/image_raw
+  depth: /depth/image_rect_raw
+  rgb_info: /color/camera_info
+  depth_info: /depth/camera_info
+  depth_to_color_extrinsics: /wrist_camera_left/extrinsics/depth_to_color
+  result_json: /rim_grasp/left/result_json
+  contact_pose: /rim_grasp/left/contact_pose
+  overlay: /rim_grasp/left/overlay
+  markers: /rim_grasp/left/markers
+model:
+  grounding_model: IDEA-Research/grounding-dino-tiny
+  sam2_model: facebook/sam2.1-hiera-small
+  model_cache: ../models
+  local_files_only: true
+  categories: [cup, bowl, plate]
+  box_threshold: 0.30
+  text_threshold: 0.25
+  min_mask_pixels: 500
+  device: cuda
+geometry:
+  depth_scale_m: 0.001
+  min_depth_m: 0.10
+  max_depth_m: 1.50
+  sync_slop_s: 0.035
+  target_timeout_s: 0.75
+  tf_timeout_s: 0.08
+  tf_max_age_s: 0.12
+  table_distance_threshold_m: 0.006
+  table_min_points: 800
+  table_voxel_m: 0.008
+  min_rim_depth_support: 0.55
+  max_ellipse_residual: 0.12
+  min_rim_height_m: 0.008
+  max_rim_height_std_m: 0.015
+  rim_band_px: 8
+  candidate_count: 32
+  max_unknown_fraction: 0.25
+  obstacle_clearance_m: 0.010
+gripper:
+  finger_thickness_m: 0.010
+  finger_width_m: 0.016
+  finger_length_m: 0.055
+  min_opening_m: 0.015
+  max_opening_m: 0.090
+  opening_margin_m: 0.006
+  min_contact_height_above_table_m: 0.008
+  max_insertion_depth_m: 0.035
+  table_clearance_m: 0.010
+  path_clearance_m: 0.012
+# Runtime subscription is preferred; these values are the read-only values from
+# the active left D405 and provide a deterministic fallback for offline use.
+depth_to_color:
+  rotation_row_major: [0.9999687076, 0.0046986933, -0.0063683591, -0.0047043907, 0.9999885559, -0.0008799759, 0.0063641514, 0.0009099075, 0.9999793172]
+  translation_m: [0.00000990747, 0.00001000000, 0.00001000000]
+contact_to_tcp: null

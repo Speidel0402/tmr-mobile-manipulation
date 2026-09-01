@@ -1,0 +1,33 @@
+calibration_type: eye_in_hand
+camera_frame: wrist_camera_left_color_optical_frame
+parent_pose_source: /left/franka_robot_state_broadcaster/current_pose
+parent_pose_frame: base
+parent_semantics: measured_left_end_effector
+
+# T_parent_camera: maps points from camera optical coordinates into the
+# measured left end-effector coordinates reported by current_pose.
+transform_parent_from_camera:
+  translation_m: [0.0621444405, -0.0100142046, -0.1025307103]
+  quaternion_xyzw: [-0.1286317605, -0.1118043433, 0.6958632660, 0.6976589239]
+  matrix_row_major:
+    - [0.0065482077, -0.9421872556, -0.3350228296, 0.0621444405]
+    - [0.9997136136, -0.0015436295, 0.0238811202, -0.0100142046]
+    - [-0.0230176383, -0.3350832622, 0.9419073180, -0.1025307103]
+    - [0.0, 0.0, 0.0, 1.0]
+
+solver:
+  selected_method: park
+  sample_count: 10
+  tag_family: apriltag_36h11
+  tag_size_m: 0.018
+  tag_spacing_ratio: 0.3
+  fixed_target_translation_rms_m: 0.000268375
+  fixed_target_rotation_rms_deg: 0.0832391
+  cross_check_methods: [daniilidis, park, horaud]
+  rejected_method: tsai
+  rejected_reason: insufficient_rotation_excitation
+
+limitations:
+  - The parent is the measured EE pose published by the Franka state broadcaster; it has not been proven identical to URDF link8.
+  - Screen scaling directly affects translation scale; the displayed black tag edge was supplied as 18 mm.
+  - Recalibrate if the camera mount or displayed tag size changes.

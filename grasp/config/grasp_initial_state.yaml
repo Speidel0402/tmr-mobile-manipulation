@@ -1,0 +1,46 @@
+# Captured from the live measured_joint_states topics on 2026-08-30.
+# Semantic name: 夹取初始状态 (grasp initial state)
+# This file records arm joint positions only; it does not command either gripper.
+# Restore motions must use the matching arm namespace, low velocity, and normal
+# controller/error checks before and after execution.
+
+state_name: grasp_initial_state
+position_unit: rad
+
+left:
+  namespace: /left
+  joint_names:
+    - left_fr3v2_joint1
+    - left_fr3v2_joint2
+    - left_fr3v2_joint3
+    - left_fr3v2_joint4
+    - left_fr3v2_joint5
+    - left_fr3v2_joint6
+    - left_fr3v2_joint7
+  positions:
+    - -2.4404187202453613
+    - -1.0571141242980957
+    - 2.269590377807617
+    - -1.2946336269378662
+    - 1.6401503086090088
+    - 1.4328300952911377
+    - -1.7251158952713013
+
+right:
+  namespace: /right
+  joint_names:
+    - right_fr3v2_joint1
+    - right_fr3v2_joint2
+    - right_fr3v2_joint3
+    - right_fr3v2_joint4
+    - right_fr3v2_joint5
+    - right_fr3v2_joint6
+    - right_fr3v2_joint7
+  positions:
+    - -1.6818886995315552
+    - -0.7537260055541992
+    - 0.8576784729957581
+    - -2.6971640586853027
+    - -0.5807996392250061
+    - 2.465313673019409
+    - 1.4973987340927124

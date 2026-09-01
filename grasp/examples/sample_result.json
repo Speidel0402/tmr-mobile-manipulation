@@ -1,0 +1,27 @@
+[
+  {
+    "timestamp": 1788063199.531,
+    "frame_id": "wrist_camera_left_color_optical_frame",
+    "camera_id": "left",
+    "object_id": "frame-1788063199531000064-0",
+    "category": "cup",
+    "valid": true,
+    "invalid_reason": "",
+    "rim_position": [0.041, -0.018, 0.392],
+    "contact_pose": {"position": [0.041, -0.018, 0.392], "orientation_xyzw": [0.0, 0.7071, 0.0, 0.7071]},
+    "approach_direction": [0.0, 0.0, 1.0],
+    "closing_direction": [1.0, 0.0, 0.0],
+    "tcp_pose": null,
+    "pregrasp_opening_width_m": 0.032,
+    "insertion_depth_m": 0.021,
+    "detection_score": 0.83,
+    "geometry_score": 0.76,
+    "diagnostics": {"example_only_not_measured": true, "arm_reachability_checked": false},
+    "id_semantics": "frame-local detection id; not a persistent tracking id",
+    "coordinate_semantics": {
+      "rim_position": "observed 3D point on the vessel rim surface",
+      "contact_pose": "planned center between inner and outer finger contacts",
+      "tcp_pose": "robot TCP target only when a calibrated contact-to-TCP transform is configured"
+    }
+  }
+]

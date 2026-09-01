@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <!-- Replace after checking the local ROS 2 host's NIC name on the AgileAPAC-Router1 subnet. -->
+      <Interfaces><NetworkInterface name="REPLACE_WITH_LOCAL_INTERFACE_NAME" multicast="true"/></Interfaces>
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
+    <Discovery>
+      <Peers><Peer address="172.16.0.100"/></Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

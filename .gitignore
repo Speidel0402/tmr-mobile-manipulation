@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+install/
+log/
+logs/
+outputs/
+*.log
+*.bag
+*.db3
+*.mcap
+.DS_Store
+Thumbs.db
+
+# Model weights are downloaded separately.
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Local credentials and machine-specific overrides.
+.env
+.env.*
+!*example*
+config/local_*
+

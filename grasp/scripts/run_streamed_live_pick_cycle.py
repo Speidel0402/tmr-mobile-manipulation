@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""One in-memory live pick cycle; this file is streamed to the robot via stdin."""
+"""One ordered, robot-local live pick cycle for the competition workflow."""
 
+import argparse
 import io
 import json
 import math
@@ -18,7 +19,13 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 
 from cup_rim_detector import detect_green_cup_right
-from pick_cycle_policy import classify_close_result, top_pose_policy, visual_tolerances
+from pick_cycle_policy import (
+    classify_close_result,
+    grasp_plane_policy,
+    top_pose_policy,
+    validate_camera_snapshot,
+    visual_tolerances,
+)
 from servo_cup_edge_xy import JOINT_NAMES, ServoNode, adaptive_parameters, cap_norm
 
 
@@ -26,8 +33,11 @@ SNAPSHOT_URL = "http://127.0.0.1:18080/snapshot.npz"
 GRIPPER_ACTION = "/left/gripper/robotiq_gripper_controller/gripper_cmd"
 TARGET = np.asarray([293.905848, 167.921509], dtype=float)
 REFERENCE_Z = 0.596413
-GRASP_Z = REFERENCE_Z - 0.33
-MAX_RECOVERABLE_VISUAL_ERROR_PX = 9.0
+DESCENT_M = 0.240
+GRASP_Z = REFERENCE_Z - DESCENT_M
+MAX_RECOVERABLE_VISUAL_ERROR_PX = 11.0
+MIN_EXECUTABLE_FINE_STEP_M = 0.0025
+MAX_HIGH_GRASP_PLANE_RESIDUAL_M = 0.020
 REFERENCE_Q = np.asarray(
     [0.6965795194017754, 0.7171679017330287, 0.006319729771827597, 0.020180061680965224],
     dtype=float,
@@ -54,30 +64,58 @@ def emit(event, **values):
     print("PICK=" + json.dumps({"event": event, **values}, separators=(",", ":")), flush=True)
 
 
-def snapshot_rgb():
+def snapshot_rgb(expected_session_id=None):
     with urllib.request.urlopen(SNAPSHOT_URL, timeout=2.0) as response:
         payload = response.read()
     with np.load(io.BytesIO(payload), allow_pickle=False) as sample:
-        return sample["rgb"].copy(), float(sample["rgb_stamp"])
+        rgb = sample["rgb"].copy()
+        session_id = validate_camera_snapshot(
+            role=sample["camera_role"].item(),
+            topic=sample["rgb_topic"].item(),
+            frame_id=sample["rgb_frame_id"].item(),
+            session_id=sample["camera_session_id"].item(),
+            image_shape=rgb.shape,
+            expected_session_id=expected_session_id,
+        )
+        return rgb, float(sample["rgb_stamp"]), session_id
 
 
 def cup_right_once(bgr):
     return detect_green_cup_right(bgr)
 
 
-def detect_cup_right(previous_stamp=None, timeout=7.0):
+def detect_cup_right(
+    previous_stamp=None,
+    timeout=7.0,
+    expected_session_id=None,
+    expected_point=None,
+    maximum_tracking_error_px=80.0,
+):
     deadline = time.monotonic() + timeout
     last_stamp = -math.inf if previous_stamp is None else float(previous_stamp)
     observations = []
     last_error = "no fresh frame"
     while time.monotonic() < deadline:
         try:
-            bgr, stamp = snapshot_rgb()
+            bgr, stamp, session_id = snapshot_rgb(expected_session_id)
+            if expected_session_id is None:
+                expected_session_id = session_id
             if stamp <= last_stamp + 1e-6:
                 time.sleep(0.025)
                 continue
             last_stamp = stamp
             point, detail = cup_right_once(bgr)
+            if expected_point is not None:
+                tracking_error = float(
+                    np.linalg.norm(np.asarray(point, dtype=float) - np.asarray(expected_point, dtype=float))
+                )
+                if tracking_error > float(maximum_tracking_error_px):
+                    last_error = (
+                        f"cup track jump {tracking_error:.1f}px exceeds "
+                        f"{float(maximum_tracking_error_px):.1f}px"
+                    )
+                    time.sleep(0.025)
+                    continue
             observations.append((point, stamp, detail))
             observations = observations[-7:]
             if len(observations) >= 3:
@@ -92,6 +130,7 @@ def detect_cup_right(previous_stamp=None, timeout=7.0):
                         "stamp": float(max(item[1] for item in observations)),
                         "spread_px": float(np.max(np.linalg.norm(stable - point, axis=1))),
                         "detail": observations[-1][2],
+                        "camera_session_id": expected_session_id,
                     }
             time.sleep(0.025)
         except Exception as exc:
@@ -207,7 +246,7 @@ def read_settled_pose(arm, samples=5, interval_s=0.06):
     return pose
 
 
-def validate_top(pose, z_tolerance=0.006, orientation_tolerance_deg=2.0):
+def validate_top(pose, z_tolerance=0.010, orientation_tolerance_deg=3.0):
     z_error, angle = top_errors(pose)
     if abs(z_error) > z_tolerance or angle > orientation_tolerance_deg:
         raise RuntimeError(f"calibration pose mismatch z={z_error:.6f}m orientation={angle:.3f}deg")
@@ -291,10 +330,13 @@ def visual_tolerance(observation):
     return visual_tolerances(observation.get("spread_px", 0.0))["enter_px"]
 
 
-def calibrate(arm):
+def calibrate(arm, camera_session_id, preflight_stamp):
     initial_pose = arm.fk(list(arm.q))
     base_origin = np.asarray([initial_pose.position.x, initial_pose.position.y], dtype=float)
-    first = detect_cup_right()
+    first = detect_cup_right(
+        previous_stamp=preflight_stamp,
+        expected_session_id=camera_session_id,
+    )
     p0, stamp = first["point"], first["stamp"]
     emit("observe", stage="initial", point_px=p0.tolist(), target_px=TARGET.tolist(), spread_px=first["spread_px"])
     initial_error = TARGET - p0
@@ -304,12 +346,12 @@ def calibrate(arm):
         return {"point": p0, "error": initial_error, "iterations": 0, "mode": "initial_soft_accept"}
 
     actual_x, base_x, _ = arm.move_xy([0.007, 0.0])
-    obs_x = detect_cup_right(previous_stamp=stamp)
+    obs_x = detect_cup_right(previous_stamp=stamp, expected_session_id=camera_session_id)
     px, stamp = obs_x["point"], obs_x["stamp"]
     emit("probe", axis="x", actual_m=actual_x.tolist(), point_px=px.tolist())
 
     actual_y, base_y, _ = arm.move_xy([-0.007, 0.007])
-    obs_y = detect_cup_right(previous_stamp=stamp)
+    obs_y = detect_cup_right(previous_stamp=stamp, expected_session_id=camera_session_id)
     py, stamp = obs_y["point"], obs_y["stamp"]
     emit("probe", axis="y", actual_m=actual_y.tolist(), point_px=py.tolist())
 
@@ -338,11 +380,16 @@ def calibrate(arm):
         "observation": current_observation,
         "norm": float(np.linalg.norm(TARGET - current_point)),
     }
-    for iteration in range(1, 11):
+    for iteration in range(1, 17):
         error = TARGET - current_point
         tolerance = visual_tolerance(current_observation)
         if float(np.max(np.abs(error))) <= tolerance:
-            confirm = detect_cup_right(previous_stamp=stamp)
+            confirm = detect_cup_right(
+                previous_stamp=stamp,
+                expected_session_id=camera_session_id,
+                expected_point=current_point,
+                maximum_tracking_error_px=30.0,
+            )
             stamp = confirm["stamp"]
             final_error = TARGET - confirm["point"]
             hold_tolerance = min(8.0, max(tolerance, visual_tolerance(confirm)) + 1.0)
@@ -358,24 +405,34 @@ def calibrate(arm):
             jacobian = probe_jacobian.copy()
             step = cap_norm(np.linalg.pinv(jacobian, rcond=0.06) @ error * gain, limit)
         step_norm = float(np.linalg.norm(step))
-        if step_norm < 0.00055:
-            resolution_limit = min(9.0, tolerance + 2.0)
-            if float(np.max(np.abs(error))) <= resolution_limit:
-                emit("aligned_resolution_limit", iteration=iteration - 1, point_px=current_point.tolist(), error_px=error.tolist(), tolerance_px=resolution_limit, requested_step_m=step.tolist())
-                return {"point": current_point, "error": error, "iterations": iteration - 1, "mode": "resolution_limited_soft_accept"}
-            jacobian = probe_jacobian.copy()
-            step = cap_norm(np.linalg.pinv(jacobian, rcond=0.06) @ error * gain, limit)
-            step_norm = float(np.linalg.norm(step))
-            if step_norm < 0.00055 and step_norm > 1e-9:
-                step = step * (0.00055 / step_norm)
-            elif step_norm <= 1e-9:
+        if step_norm < MIN_EXECUTABLE_FINE_STEP_M:
+            # The PTP action's practical joint tolerance maps to roughly a
+            # 2 mm Cartesian deadband.  Smaller commands soft-complete without
+            # moving, so keep iterating with the smallest empirically
+            # executable step and let the next image reverse/refine it.
+            if step_norm <= 1e-9:
+                jacobian = probe_jacobian.copy()
+                step = cap_norm(np.linalg.pinv(jacobian, rcond=0.06) @ error, limit)
+                step_norm = float(np.linalg.norm(step))
+            if step_norm <= 1e-9:
                 raise RuntimeError("visual correction unavailable after Jacobian reset")
-            emit("jacobian_reset", iteration=iteration, reason="tiny_step_above_soft_tolerance")
+            step = step * (MIN_EXECUTABLE_FINE_STEP_M / step_norm)
+            emit(
+                "fine_step_promoted",
+                iteration=iteration,
+                minimum_executable_m=MIN_EXECUTABLE_FINE_STEP_M,
+            )
         if float(np.linalg.norm(current_base + step - base_origin)) > 0.24:
             raise RuntimeError("visual search exceeded 0.24m")
         old_norm = float(np.linalg.norm(error))
         actual, new_base, end_pose = arm.move_xy(step)
-        observation = detect_cup_right(previous_stamp=stamp)
+        predicted_point = current_point + jacobian @ actual
+        observation = detect_cup_right(
+            previous_stamp=stamp,
+            expected_session_id=camera_session_id,
+            expected_point=predicted_point,
+            maximum_tracking_error_px=70.0,
+        )
         stamp = observation["stamp"]
         new_point = observation["point"]
         observed = new_point - current_point
@@ -415,7 +472,12 @@ def calibrate(arm):
 
     if float(np.linalg.norm(np.asarray(arm.q) - np.asarray(best["q"]))) > 1e-4:
         arm.move_ptp(best["q"])
-        best_confirm = detect_cup_right(previous_stamp=stamp)
+        best_confirm = detect_cup_right(
+            previous_stamp=stamp,
+            expected_session_id=camera_session_id,
+            expected_point=best["point"],
+            maximum_tracking_error_px=35.0,
+        )
         best["point"] = best_confirm["point"]
         best["error"] = TARGET - best_confirm["point"]
         best["observation"] = best_confirm
@@ -425,7 +487,7 @@ def calibrate(arm):
     )
     if float(np.max(np.abs(best["error"]))) <= final_limit:
         emit("aligned_best_recovered", point_px=best["point"].tolist(), error_px=best["error"].tolist(), tolerance_px=final_limit)
-        return {"point": best["point"], "error": best["error"], "iterations": 10, "mode": "best_pose_recovered"}
+        return {"point": best["point"], "error": best["error"], "iterations": 16, "mode": "best_pose_recovered"}
     raise RuntimeError("visual alignment remained outside recoverable range " + repr(best["error"].tolist()))
 
 
@@ -464,6 +526,13 @@ def move_vertical(arm, delta_z):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--force-restore-top",
+        action="store_true",
+        help="restore the recorded successful top joints even when the measured pose is already acceptable",
+    )
+    args = parser.parse_args()
     rclpy.init()
     arm = ServoNode()
     gripper = Node("streamed_ordered_left_pick")
@@ -471,9 +540,18 @@ def main():
     top_z = None
     failure = None
     operator_stop = False
+    cycle_success = False
     phase = "INIT"
     try:
         arm.wait_ready()
+        phase = "CAMERA_PREFLIGHT"
+        _preflight_rgb, camera_preflight_stamp, camera_session_id = snapshot_rgb()
+        emit(
+            "camera_verified",
+            role="left_wrist",
+            session_id=camera_session_id,
+            rgb_stamp=camera_preflight_stamp,
+        )
         phase = "OPENING"
         opened = command_gripper(gripper, 0.0, "open_before_motion")
         if not (
@@ -498,8 +576,13 @@ def main():
         starting_z_error, starting_angle_error = top_errors(starting_pose)
         pose_policy = top_pose_policy(starting_z_error, starting_angle_error)
         emit("starting_pose_after_handoff", z=float(starting_pose.position.z), z_error_m=starting_z_error, orientation_error_deg=starting_angle_error, policy=pose_policy)
-        if pose_policy != "accept":
+        if args.force_restore_top or pose_policy != "accept":
             phase = "RESTORING_REFERENCE_POSE"
+            emit(
+                "top_restore_requested",
+                forced=bool(args.force_restore_top),
+                measured_policy=pose_policy,
+            )
             restore_recorded_top_joint_pose(arm)
         else:
             arm.lock_z = float(starting_pose.position.z)
@@ -507,7 +590,7 @@ def main():
         validate_top(arm.fk(list(arm.q)))
 
         phase = "VISUAL_ALIGNING"
-        alignment = calibrate(arm)
+        alignment = calibrate(arm, camera_session_id, camera_preflight_stamp)
         top_pose = arm.fk(list(arm.q))
         validate_top(top_pose)
         top_z = float(top_pose.position.z)
@@ -515,7 +598,7 @@ def main():
         emit("order_confirmed", completed="visual_alignment", next="descend", final_error_px=alignment["error"].tolist())
 
         requested_down = GRASP_Z - top_z
-        if not -0.35 <= requested_down < -0.25:
+        if not -0.35 <= requested_down < -0.20:
             raise RuntimeError(f"grasp-plane delta outside automatic range: {requested_down:.6f}m")
         phase = "DESCENDING"
         low_pose, down_actual = move_vertical(arm, requested_down)
@@ -525,7 +608,23 @@ def main():
             down_actual += correction
             low_error = float(low_pose.position.z) - GRASP_Z
             emit("grasp_plane_corrected", residual_m=low_error)
-        if abs(low_error) > 0.012:
+        plane_policy = grasp_plane_policy(
+            low_error,
+            nominal_tolerance_m=0.012,
+            high_limit_m=MAX_HIGH_GRASP_PLANE_RESIDUAL_M,
+        )
+        if plane_policy == "accept_high":
+            # The Franka PTP action can soft-complete a few joint milliradians
+            # early.  On this calibrated approach that maps to roughly
+            # 9--15 mm above the nominal cup plane.  The successful physical
+            # grasp tolerates that high-side residual; never apply the same
+            # relaxation below the table-side target.
+            emit(
+                "grasp_plane_high_soft_accept",
+                residual_m=low_error,
+                limit_m=MAX_HIGH_GRASP_PLANE_RESIDUAL_M,
+            )
+        elif plane_policy == "reject":
             raise RuntimeError(f"grasp plane remained outside recoverable range: {low_error:.6f}m")
         phase = "AT_LOW"
         emit("order_confirmed", completed="descend", next="close", down_actual_m=down_actual)
@@ -539,6 +638,7 @@ def main():
         phase = "LIFTING"
         final_pose, up_actual = move_vertical(arm, top_z - float(current.position.z))
         phase = "DONE"
+        cycle_success = True
         emit("success", alignment_error_px=alignment["error"].tolist(), alignment_mode=alignment.get("mode"), down_actual_m=down_actual, up_actual_m=up_actual, final_z=float(final_pose.position.z), top_height_error_m=float(final_pose.position.z)-top_z, close=closed, close_history=close_history)
     except KeyboardInterrupt:
         operator_stop = True
@@ -569,14 +669,15 @@ def main():
                 # teardown and can leave the hardware UNCONFIGURED.  Let the
                 # action server finish, then recover the complete left runtime
                 # (hardware, state broadcasters, and impedance hold) once.
-                time.sleep(1.0)
-                arm.ensure_runtime_ready()
-                emit("controller", joint_impedance="restored_to_hold", operator_stop=operator_stop)
+                recovery_attempt = arm.ensure_stable_runtime_after_ptp()
+                emit("controller", joint_impedance="restored_to_hold", operator_stop=operator_stop, recovery_attempt=recovery_attempt)
                 settled_hold = read_settled_pose(arm)
                 hold_z_error, hold_angle_error = top_errors(settled_hold)
                 emit("hold_pose_after_handoff", z=float(settled_hold.position.z), z_error_m=hold_z_error, orientation_error_deg=hold_angle_error)
             except Exception as exc:
                 emit("controller_restore_failed", detail=repr(exc))
+                if failure is None and not operator_stop:
+                    failure = "controller hold recovery failed: " + repr(exc)
         arm.destroy_node()
         gripper.destroy_node()
         rclpy.shutdown()
@@ -584,6 +685,9 @@ def main():
         raise RuntimeError(failure)
     if operator_stop:
         return
+    if not cycle_success:
+        raise RuntimeError("pick cycle exited without success")
+    emit("cycle_complete", final_state=phase, controller_hold="stable")
 
 
 if __name__ == "__main__":

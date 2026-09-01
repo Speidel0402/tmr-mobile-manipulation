@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 
 import rclpy
 from geometry_msgs.msg import Pose
@@ -24,6 +25,7 @@ def main():
 
     rclpy.init()
     node = ServoNode()
+    impedance_off = False
     try:
         node.wait_ready()
         node.max_joint_velocity = float(args.joint_velocity)
@@ -52,10 +54,38 @@ def main():
             raise RuntimeError(
                 f"vertical path invalid: fraction={response.fraction:.4f}, code={response.error_code.val}"
             )
+
+        # The PTP controller and the impedance hold controller must not command
+        # the arm at the same time.  Plan first, then hand control to PTP.
+        node.set_impedance(False)
+        impedance_off = True
+        time.sleep(0.35)
         for q in path:
             node.move_ptp(q)
+
+        for _ in range(8):
+            rclpy.spin_once(node, timeout_sec=0.04)
+        before_hold = node.fk(list(node.q))
+
+        # Restore the normal hold controller only after the Cartesian motion is
+        # complete, preventing the old target from pulling the arm back.
+        time.sleep(1.0)
+        node.ensure_runtime_ready()
+        impedance_off = False
+        for _ in range(8):
+            rclpy.spin_once(node, timeout_sec=0.04)
         end = node.fk(list(node.q))
+        actual_delta = [
+            end.position.x - start.position.x,
+            end.position.y - start.position.y,
+            end.position.z - start.position.z,
+        ]
+        if abs(actual_delta[2] - args.delta_z) > 0.012:
+            raise RuntimeError(
+                f"vertical endpoint error {actual_delta[2] - args.delta_z:+.6f} m"
+            )
         print(json.dumps({
+            "status": "success",
             "start_joint_positions_rad": q0,
             "start_position_m": [start.position.x, start.position.y, start.position.z],
             "start_orientation_xyzw": [start.orientation.x, start.orientation.y, start.orientation.z, start.orientation.w],
@@ -65,13 +95,24 @@ def main():
             "cartesian_waypoint_count": len(path),
             "end_position_m": [end.position.x, end.position.y, end.position.z],
             "end_orientation_xyzw": [end.orientation.x, end.orientation.y, end.orientation.z, end.orientation.w],
-            "actual_delta_m": [end.position.x-start.position.x, end.position.y-start.position.y, end.position.z-start.position.z],
+            "pre_hold_position_m": [before_hold.position.x, before_hold.position.y, before_hold.position.z],
+            "actual_delta_m": actual_delta,
             "gripper_commanded": False,
-        }, indent=2))
+        }, indent=2), flush=True)
+        return 0
+    except BaseException as exc:
+        print(json.dumps({"status": "failed", "error": repr(exc)}, indent=2), flush=True)
+        return 1
     finally:
+        if impedance_off:
+            try:
+                time.sleep(1.0)
+                node.ensure_runtime_ready()
+            except Exception as exc:
+                print(json.dumps({"event": "hold_restore_failed", "error": repr(exc)}), flush=True)
         node.destroy_node()
         rclpy.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -26,8 +26,10 @@ python3 ~/tmr_cycle/scripts/07_start_to_pickup.py \
 
 ```bash
 python3 ~/tmr_cycle/scripts/07_start_to_pickup.py \
-  --config ~/tmr_cycle/config/start_to_pickup.yaml --execute
+  --config ~/tmr_cycle/config/start_to_pickup.yaml --execute --disable-collision-guard
 ```
+
+当前最终比赛入口按现场要求关闭全部底盘碰撞判定，包括平移雷达/地图扫掠、旋转净空、地图冲突和门侧净空判断。`03_start_navigation.sh --run-mission` 与综合任务协调器都会显式传入该参数。里程计目标闭环、传感器时间戳、控制所有权、超时与无进展停止仍然有效。直接运行 `07_start_to_pickup.py --execute` 而不带该参数时，保留原碰撞判定，仅供需要时诊断。
 
 正式运行应在底盘主机本地启动，不把 20 Hz 控制环放在远程 Codex/SSH 链路上；远端只负责发起、停止和查看结构化状态。机械臂若没有收纳在当前 `0.58 m` 宽、前后各 `0.40 m` 的包络内，必须先把 `config/start_to_pickup.yaml` 的 `footprint` 改成整机实测外廓。
 

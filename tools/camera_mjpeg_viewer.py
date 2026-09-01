@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import threading
 import time
+import uuid
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -13,6 +14,12 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 
 
+CAMERA_ROLE = "left_wrist"
+RGB_TOPIC = "/wrist_camera_left/color/image_raw"
+DEPTH_TOPIC = "/wrist_camera_left/aligned_depth_to_color/image_raw"
+CAMERA_INFO_TOPIC = "/wrist_camera_left/color/camera_info"
+
+
 class CameraStreams(Node):
     def __init__(self):
         super().__init__("temporary_camera_mjpeg_viewer")
@@ -21,21 +28,23 @@ class CameraStreams(Node):
         self.frames = {"rgb": None, "depth": None}
         self.raw = {"rgb": None, "depth": None, "camera_k": None}
         self.stamps = {"rgb": 0.0, "depth": 0.0}
+        self.rgb_frame_id = ""
+        self.session_id = uuid.uuid4().hex
         self.create_subscription(
             Image,
-            "/wrist_camera_left/color/image_raw",
+            RGB_TOPIC,
             self.on_rgb,
             qos_profile_sensor_data,
         )
         self.create_subscription(
             Image,
-            "/wrist_camera_left/aligned_depth_to_color/image_raw",
+            DEPTH_TOPIC,
             self.on_depth,
             qos_profile_sensor_data,
         )
         self.create_subscription(
             CameraInfo,
-            "/wrist_camera_left/color/camera_info",
+            CAMERA_INFO_TOPIC,
             self.on_camera_info,
             qos_profile_sensor_data,
         )
@@ -51,6 +60,7 @@ class CameraStreams(Node):
         with self.lock:
             self.raw["rgb"] = image.copy()
             self.stamps["rgb"] = msg.header.stamp.sec + 1e-9 * msg.header.stamp.nanosec
+            self.rgb_frame_id = str(msg.header.frame_id)
         self._store_jpeg("rgb", image)
 
     def on_depth(self, msg):
@@ -86,6 +96,8 @@ class Handler(BaseHTTPRequestHandler):
                 camera_k = None if self.streams.raw["camera_k"] is None else self.streams.raw["camera_k"].copy()
                 rgb_stamp = self.streams.stamps["rgb"]
                 depth_stamp = self.streams.stamps["depth"]
+                rgb_frame_id = self.streams.rgb_frame_id
+                session_id = self.streams.session_id
             if rgb is None:
                 self.send_error(503, "RGB snapshot is not ready")
                 return
@@ -93,6 +105,13 @@ class Handler(BaseHTTPRequestHandler):
             snapshot = {
                 "rgb": rgb,
                 "rgb_stamp": np.asarray(rgb_stamp),
+                # These scalar strings let the pick process reject a stale
+                # viewer, a ZED/right-camera viewer, or a viewer restart in the
+                # middle of visual servoing.
+                "camera_role": np.asarray(CAMERA_ROLE),
+                "rgb_topic": np.asarray(RGB_TOPIC),
+                "rgb_frame_id": np.asarray(rgb_frame_id),
+                "camera_session_id": np.asarray(session_id),
             }
             # Depth is optional for the competition RGB edge-servo path.  Keep
             # it when available for offline tools, but never block a grasp on

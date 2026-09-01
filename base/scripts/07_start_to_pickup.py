@@ -1108,6 +1108,12 @@ def run_ros_mission(cfg: dict) -> tuple[int, dict]:
 
         def runtime_map_report(self, reference, lidar_gap) -> dict:
             """Use this run's OccupancyGrid as a candidate/cross-check, never pixels."""
+            if os.environ.get("TMR_CYCLE_DISABLE_COLLISION_GUARD") == "1":
+                return {
+                    "available": False,
+                    "decision": "disabled",
+                    "reason": "runtime map collision/contradiction checks explicitly disabled",
+                }
             if self._map_stamp_fault:
                 return {
                     "available": False,
@@ -1325,7 +1331,11 @@ def run_ros_mission(cfg: dict) -> tuple[int, dict]:
             finally:
                 self.stop()
 
-    result: dict[str, Any] = {"status": "running", "states": []}
+    result: dict[str, Any] = {
+        "status": "running",
+        "states": [],
+        "collision_guard_enabled": os.environ.get("TMR_CYCLE_DISABLE_COLLISION_GUARD") != "1",
+    }
     rclpy.init()
     node = ContinuousRouteNode()
     exit_code = 1
@@ -1432,6 +1442,26 @@ def run_ros_mission(cfg: dict) -> tuple[int, dict]:
         node.set_state(RouteState.FINAL_STOP)
         result["states"].append(RouteState.FINAL_STOP.value)
         node.stop()
+        # Do not hand control to the arm merely because the final odometry
+        # target returned.  Require a bounded stationary window while the
+        # exclusive lease and zero command are still actively held.
+        settled = node.wait_stationary(timeout_s=4.0)
+        node.assert_control_ownership(force=True)
+        node.stop()
+        zero_latched = all(abs(float(value)) <= 1e-9 for value in node._command)
+        if not zero_latched or not node._control_lease_acquired:
+            raise MissionAbort("final zero-speed lease was not retained")
+        result["final_stationary"] = {
+            "confirmed": True,
+            "x_m": float(settled.x),
+            "y_m": float(settled.y),
+            "yaw_rad": float(settled.yaw),
+            "vx_mps": float(settled.vx),
+            "vy_mps": float(settled.vy),
+            "wz_rps": float(settled.wz),
+        }
+        result["zero_command_latched"] = True
+        result["control_lease_held"] = True
         result["status"] = "success"
         result["final_state"] = RouteState.FINAL_STOP.value
         exit_code = 0
@@ -1467,6 +1497,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="enable ROS connections and base commands; omitted means local config check only",
     )
+    parser.add_argument(
+        "--disable-collision-guard",
+        action="store_true",
+        help=(
+            "disable runtime LiDAR/map/rotation/door-side collision decisions; "
+            "odometry, ownership, freshness, timeout and progress guards remain active"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1476,6 +1514,8 @@ def main() -> int:
     if not args.execute:
         print(json.dumps(_dry_run_summary(cfg, args.config.resolve()), ensure_ascii=False, indent=2))
         return 0
+    if args.disable_collision_guard:
+        os.environ["TMR_CYCLE_DISABLE_COLLISION_GUARD"] = "1"
     exit_code, result = run_ros_mission(cfg)
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return exit_code

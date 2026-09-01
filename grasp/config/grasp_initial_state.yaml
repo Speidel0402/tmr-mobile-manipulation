@@ -1,4 +1,5 @@
-# Captured from the live measured_joint_states topics on 2026-08-30.
+# Left is the successful calibrated pick-top pose; right is the verified grasp
+# initial pose captured from measured_joint_states.  Updated 2026-09-01.
 # Semantic name: 夹取初始状态 (grasp initial state)
 # This file records arm joint positions only; it does not command either gripper.
 # Restore motions must use the matching arm namespace, low velocity, and normal
@@ -18,13 +19,13 @@ left:
     - left_fr3v2_joint6
     - left_fr3v2_joint7
   positions:
-    - -2.4404187202453613
-    - -1.0571141242980957
-    - 2.269590377807617
-    - -1.2946336269378662
-    - 1.6401503086090088
-    - 1.4328300952911377
-    - -1.7251158952713013
+    - -1.71976900100708
+    - -1.6329213380813599
+    - 1.8240526914596558
+    - -2.447446823120117
+    - 2.177191972732544
+    - 0.8496646285057068
+    - -3.05077862739563
 
 right:
   namespace: /right

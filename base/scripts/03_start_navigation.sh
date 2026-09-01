@@ -283,7 +283,7 @@ main() {
 
   if [[ "${run_mission}" == true ]]; then
     start_process mission python3 "${root_dir}/scripts/07_start_to_pickup.py" \
-      --config "${root_dir}/config/start_to_pickup.yaml" --execute
+      --config "${root_dir}/config/start_to_pickup.yaml" --execute --disable-collision-guard
     echo "[mission] complete start-to-pickup route launched in the same isolated ROS environment"
   else
     echo "[note] no motion mission was started; use --run-mission for the one-command workflow"

@@ -13,6 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
+SOURCE = (SCRIPTS / "07_start_to_pickup.py").read_text(encoding="utf-8")
 sys.path.insert(0, str(SCRIPTS))
 SPEC = importlib.util.spec_from_file_location(
     "start_to_pickup_contract",
@@ -155,6 +156,12 @@ class ContinuousMissionContractTests(unittest.TestCase):
         summary = mission._dry_run_summary(self.config, self.config_path)
         self.assertFalse(summary["example_image_used"])
         self.assertEqual(summary["command_topic"], "/tmr_cycle/mission_cmd_vel")
+
+    def test_explicit_collision_disable_bypasses_every_runtime_collision_veto(self) -> None:
+        self.assertIn('"--disable-collision-guard"', SOURCE)
+        self.assertIn('"collision guard explicitly disabled"', SOURCE)
+        self.assertIn('return math.inf', SOURCE)
+        self.assertIn('"decision": "disabled"', SOURCE)
 
 
 if __name__ == "__main__":

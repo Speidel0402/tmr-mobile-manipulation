@@ -73,6 +73,7 @@ class StartNavigationScriptTests(unittest.TestCase):
         self.assertIn("--run-mission) run_mission=true", SCRIPT)
         self.assertIn('if [[ "${run_mission}" == true ]]; then', SCRIPT)
         self.assertIn("--config \"${root_dir}/config/start_to_pickup.yaml\" --execute", SCRIPT)
+        self.assertIn("--disable-collision-guard", SCRIPT)
 
 
 if __name__ == "__main__":

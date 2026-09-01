@@ -38,6 +38,10 @@ class ServoNode(Node):
         self.lock_z = None
         self.lock_orientation = None
         self.max_joint_velocity = 0.07
+        self.hold_target = None
+        self.hold_pub = self.create_publisher(
+            JointState, "/left/gello/joint_states", 1
+        )
         self.create_subscription(
             JointState,
             "/left/franka_robot_state_broadcaster/measured_joint_states",
@@ -109,6 +113,10 @@ class ServoNode(Node):
         # BEST_EFFORT makes this idempotent: a controller that is already
         # active must not prevent the missing publishers/hold controller from
         # being restored.
+        # Seed the impedance controller with the measured PTP endpoint before
+        # activation.  Without this refresh it can reuse an old cached target
+        # and slowly pull the arm away during a long base translation.
+        self.publish_hold_target(samples=3)
         request = SwitchController.Request()
         request.activate_controllers = [
             "joint_state_broadcaster",
@@ -122,6 +130,7 @@ class ServoNode(Node):
         response = self.call(self.switch_client, request, timeout=8.0)
         if not response.ok:
             raise RuntimeError("left runtime controller recovery failed")
+        self.publish_hold_target(samples=12)
 
         # Do not accept messages cached from before the lifecycle transition.
         self.q = None
@@ -131,6 +140,55 @@ class ServoNode(Node):
             rclpy.spin_once(self, timeout_sec=0.05)
         if self.q is None or self.robot_state is None:
             raise RuntimeError("robot state unavailable after lifecycle recovery")
+
+    def publish_hold_target(self, samples=1):
+        if self.hold_target is None:
+            return
+        message = JointState()
+        message.name = JOINT_NAMES
+        message.position = list(map(float, self.hold_target))
+        for _ in range(int(samples)):
+            message.header.stamp = self.get_clock().now().to_msg()
+            self.hold_pub.publish(message)
+            rclpy.spin_once(self, timeout_sec=0.01)
+
+    def wait_for_fresh_state(self, timeout=1.5):
+        """Require state messages produced after this method was entered."""
+        self.q = None
+        self.robot_state = None
+        deadline = time.monotonic() + float(timeout)
+        while (self.q is None or self.robot_state is None) and time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.05)
+        if self.q is None or self.robot_state is None:
+            raise RuntimeError("left state streams stopped")
+
+    def ensure_stable_runtime_after_ptp(self, attempts=3, settle_s=2.0):
+        """Recover the hold controller after the PTP server has fully torn down.
+
+        A PTP result can arrive before its controller cleanup.  Recovering the
+        impedance controller immediately used to race that cleanup and leave
+        the Franka hardware UNCONFIGURED a moment later.  This method waits for
+        the late teardown, recovers, then proves that fresh state continues.
+        """
+        time.sleep(float(settle_s))
+        last_error = None
+        for attempt in range(1, int(attempts) + 1):
+            try:
+                # A stopped stream is expected if the late teardown already
+                # happened; ensure_runtime_ready() performs lifecycle recovery.
+                try:
+                    self.wait_for_fresh_state(timeout=0.8)
+                except RuntimeError:
+                    pass
+                self.ensure_runtime_ready()
+                self.wait_for_fresh_state(timeout=1.5)
+                time.sleep(0.8)
+                self.wait_for_fresh_state(timeout=1.5)
+                return attempt
+            except Exception as exc:
+                last_error = exc
+                time.sleep(1.0)
+        raise RuntimeError(f"stable left runtime recovery failed: {last_error!r}")
 
     def wait_ready(self):
         # The PTP action server can leave the hardware unconfigured during its
@@ -182,8 +240,28 @@ class ServoNode(Node):
         if self.robot_state is None:
             raise RuntimeError("robot state lost")
         fields = self.robot_state.current_errors.get_fields_and_field_types()
-        if any(bool(getattr(self.robot_state.current_errors, key)) for key in fields):
-            raise RuntimeError("Franka error")
+        active = [
+            key
+            for key in fields
+            if bool(getattr(self.robot_state.current_errors, key))
+        ]
+        if not active:
+            return
+
+        # Consecutive PTP segments can expose a one-cycle libfranka transition
+        # pulse even though the hardware immediately returns to a clean active
+        # state.  The old single-sample gate aborted halfway through descent.
+        # Debounce briefly, but still reject every persistent error by name.
+        deadline = time.monotonic() + 0.35
+        while time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.04)
+            if self.robot_state is None:
+                continue
+            current = self.robot_state.current_errors
+            active = [key for key in fields if bool(getattr(current, key))]
+            if not active:
+                return
+        raise RuntimeError("persistent Franka error: " + ",".join(active))
 
     def move_ptp(self, q):
         for attempt in range(2):
@@ -230,10 +308,14 @@ class ServoNode(Node):
                     for actual, target in zip(self.q, q)
                 )
                 endpoint_tolerance = 0.004 if attempt == 0 else 0.003
-                if (
-                    result.target_status.status == 2
-                    and measured_error <= endpoint_tolerance
-                ):
+                # The action server sometimes reports ABORTED during its late
+                # controller teardown even though measured joints have already
+                # reached the target and libfranka is clean.  The measured
+                # endpoint plus the persistent-error gate is the authoritative
+                # proof; an operator interrupt is handled separately above.
+                if measured_error <= endpoint_tolerance:
+                    self.gate()
+                    self.hold_target = list(map(float, self.q))
                     return
                 status = (
                     f"{result.target_status.status}, "

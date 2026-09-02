@@ -28,6 +28,7 @@ WRIST_TOPICS = {
     "right": "/wrist_camera_right/color/image_raw",
 }
 MAX_FRAME_AGE_S = {"main": 1.50, "left": 0.75, "right": 0.75}
+DIRECT_URL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class Streams(Node):
@@ -68,7 +69,10 @@ class Streams(Node):
             started = time.monotonic()
             self.main_fetch_attempts += 1
             try:
-                with urllib.request.urlopen(self.main_url, timeout=1.0) as response:
+                # This is a robot-local RFC1918 endpoint.  Never send it to a
+                # desktop/host HTTP proxy, which previously returned 502 and
+                # made a healthy ZED look offline.
+                with DIRECT_URL_OPENER.open(self.main_url, timeout=1.0) as response:
                     source_marker = response.headers.get("Last-Modified")
                     payload = response.read(8_000_001)
                 if (

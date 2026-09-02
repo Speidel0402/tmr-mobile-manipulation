@@ -142,6 +142,16 @@ def remote_arm_argv(
         f"set -eo pipefail; source {environment}; export PYTHONUNBUFFERED=1; "
         f"cd {root}; exec python3 {script} {tail}"
     )
+    # The competition coordinator is normally launched on the arm computer.
+    # In that case execute arm-local phases directly; requiring the robot to
+    # SSH back into itself caused initialization to fail on hosts without a
+    # self-authorized key.  Windows/Codex orchestration still uses SSH.
+    if (
+        sys.platform != "win32"
+        and arm_host == DEFAULT_ARM_HOST
+        and Path(config.arm_root).resolve() == REPO_ROOT.resolve()
+    ) or arm_host in {"local", "localhost"}:
+        return ["bash", "-lc", payload]
     return [
         "ssh",
         "-o", "BatchMode=yes",

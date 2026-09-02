@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import threading
 import time
 import uuid
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import cv2
 import numpy as np
@@ -20,6 +22,8 @@ RGB_TOPIC = "/wrist_camera_left/color/image_raw"
 DEPTH_TOPIC = "/wrist_camera_left/aligned_depth_to_color/image_raw"
 CAMERA_INFO_TOPIC = "/wrist_camera_left/color/camera_info"
 VIEWER_TITLE = "Left Wrist D405"
+MAX_RGB_FRAME_AGE_S = 0.75
+MAX_DEPTH_FRAME_AGE_S = 1.50
 
 
 class CameraStreams(Node):
@@ -30,6 +34,8 @@ class CameraStreams(Node):
         self.frames = {"rgb": None, "depth": None}
         self.raw = {"rgb": None, "depth": None, "camera_k": None}
         self.stamps = {"rgb": 0.0, "depth": 0.0}
+        self.received_monotonic = {"rgb": 0.0, "depth": 0.0}
+        self.sequences = {"rgb": 0, "depth": 0}
         self.rgb_frame_id = ""
         self.session_id = uuid.uuid4().hex
         self.create_subscription(
@@ -64,6 +70,8 @@ class CameraStreams(Node):
         with self.lock:
             self.raw["rgb"] = image.copy()
             self.stamps["rgb"] = msg.header.stamp.sec + 1e-9 * msg.header.stamp.nanosec
+            self.received_monotonic["rgb"] = time.monotonic()
+            self.sequences["rgb"] += 1
             self.rgb_frame_id = str(msg.header.frame_id)
         self._store_jpeg("rgb", image)
 
@@ -76,6 +84,8 @@ class CameraStreams(Node):
         with self.lock:
             self.raw["depth"] = depth.copy()
             self.stamps["depth"] = msg.header.stamp.sec + 1e-9 * msg.header.stamp.nanosec
+            self.received_monotonic["depth"] = time.monotonic()
+            self.sequences["depth"] += 1
         scaled = np.clip(depth_mm, 0, 2000) * (255.0 / 2000.0)
         colored = cv2.applyColorMap(scaled.astype(np.uint8), cv2.COLORMAP_TURBO)
         colored[depth_mm <= 0] = 0
@@ -93,22 +103,61 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/snapshot.npz":
+        path = urlsplit(self.path).path
+        if path == "/healthz":
+            now = time.monotonic()
+            with self.streams.lock:
+                updated = self.streams.received_monotonic["rgb"]
+                sequence = self.streams.sequences["rgb"]
+                frame_id = self.streams.rgb_frame_id
+                session_id = self.streams.session_id
+            age = None if updated == 0.0 else now - updated
+            healthy = age is not None and age <= MAX_RGB_FRAME_AGE_S
+            body = json.dumps(
+                {
+                    "status": "ok" if healthy else "stale",
+                    "camera_role": CAMERA_ROLE,
+                    "rgb_topic": RGB_TOPIC,
+                    "rgb_frame_id": frame_id,
+                    "camera_session_id": session_id,
+                    "rgb_sequence": sequence,
+                    "rgb_age_s": None if age is None else round(age, 4),
+                    "maximum_rgb_age_s": MAX_RGB_FRAME_AGE_S,
+                },
+                separators=(",", ":"),
+            ).encode()
+            self.send_response(200 if healthy else 503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/snapshot.npz":
             with self.streams.lock:
                 rgb = None if self.streams.raw["rgb"] is None else self.streams.raw["rgb"].copy()
                 depth = None if self.streams.raw["depth"] is None else self.streams.raw["depth"].copy()
                 camera_k = None if self.streams.raw["camera_k"] is None else self.streams.raw["camera_k"].copy()
                 rgb_stamp = self.streams.stamps["rgb"]
+                rgb_updated = self.streams.received_monotonic["rgb"]
+                rgb_age_s = None if rgb_updated == 0.0 else time.monotonic() - rgb_updated
+                rgb_sequence = self.streams.sequences["rgb"]
                 depth_stamp = self.streams.stamps["depth"]
                 rgb_frame_id = self.streams.rgb_frame_id
                 session_id = self.streams.session_id
             if rgb is None:
                 self.send_error(503, "RGB snapshot is not ready")
                 return
+            if rgb_age_s is None or rgb_age_s > MAX_RGB_FRAME_AGE_S:
+                age_text = "unavailable" if rgb_age_s is None else f"{rgb_age_s:.3f}s old"
+                self.send_error(503, f"RGB frame is stale ({age_text})")
+                return
             payload = BytesIO()
             snapshot = {
                 "rgb": rgb,
                 "rgb_stamp": np.asarray(rgb_stamp),
+                "rgb_age_s": np.asarray(rgb_age_s),
+                "rgb_sequence": np.asarray(rgb_sequence, dtype=np.int64),
                 # These scalar strings let the pick process reject a stale
                 # viewer, a ZED/right-camera viewer, or a viewer restart in the
                 # middle of visual servoing.
@@ -137,42 +186,66 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path in ("/", "/index.html"):
+        if path in ("/", "/index.html"):
             depth_card = "" if not DEPTH_TOPIC else """
 <div class=card><h3>Depth (0–2 m pseudo-color)</h3><img src=/depth.mjpg><p>Black = invalid; warm/cool colors indicate distance.</p></div>"""
             body = f"""<!doctype html><meta charset=utf-8>
 <title>{VIEWER_TITLE} Live</title>
 <style>body{margin:0;background:#111;color:#eee;font-family:sans-serif}h2{margin:14px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px}.card{background:#222;padding:10px;border-radius:8px}
-img{width:100%;height:auto;background:#000}p{color:#aaa;margin:8px 0 0}</style>
+img{width:100%;height:auto;background:#000}p{color:#aaa;margin:8px 0 0}.stale{opacity:.18}</style>
 <h2>{VIEWER_TITLE} — Live</h2><div class=grid>
-<div class=card><h3>RGB</h3><img src=/rgb.mjpg></div>
+<div class=card><h3>RGB</h3><img id=rgb data-src=/rgb.mjpg src=/rgb.mjpg><p id=status>Waiting for a fresh frame…</p></div>
 {depth_card}
-</div>""".encode("utf-8")
+</div><script>
+let wasHealthy=false;
+async function monitor(){{
+  const image=document.getElementById('rgb'), label=document.getElementById('status');
+  try{{
+    const response=await fetch('/healthz?ts='+Date.now(),{{cache:'no-store'}});
+    const value=await response.json(), healthy=response.ok && value.status==='ok';
+    image.classList.toggle('stale',!healthy);
+    label.textContent=healthy ? `LIVE · ${{value.rgb_age_s}} s · #${{value.rgb_sequence}}` : 'STALE — reconnecting';
+    if(healthy && !wasHealthy) image.src=image.dataset.src+'?ts='+Date.now();
+    wasHealthy=healthy;
+  }}catch(error){{ image.classList.add('stale'); label.textContent='DISCONNECTED — reconnecting'; wasHealthy=false; }}
+}}
+setInterval(monitor,500); monitor();
+</script>""".encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
             return
         names = {"/rgb.mjpg": "rgb", "/depth.mjpg": "depth"}
-        if self.path not in names:
+        if path not in names:
             self.send_error(404)
             return
-        name = names[self.path]
+        name = names[path]
         self.send_response(200)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         try:
+            last_sequence = -1
             while True:
                 with self.streams.lock:
                     frame = self.streams.frames[name]
-                if frame:
+                    updated = self.streams.received_monotonic[name]
+                    sequence = self.streams.sequences[name]
+                maximum_age = MAX_RGB_FRAME_AGE_S if name == "rgb" else MAX_DEPTH_FRAME_AGE_S
+                age = None if updated == 0.0 else time.monotonic() - updated
+                if age is not None and age > maximum_age:
+                    break
+                if frame and age is not None and sequence != last_sequence:
                     self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n")
                     self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode())
                     self.wfile.write(frame + b"\r\n")
-                time.sleep(1 / 20)
+                    self.wfile.flush()
+                    last_sequence = sequence
+                time.sleep(1 / 50)
         except (BrokenPipeError, ConnectionResetError):
             pass
 

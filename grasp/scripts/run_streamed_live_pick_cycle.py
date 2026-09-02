@@ -29,9 +29,11 @@ from head_rgb_descent import (
 )
 from pick_cycle_policy import (
     classify_close_result,
+    cup_grasp_alignment_accepted,
     grasp_plane_policy,
     top_pose_policy,
     validate_camera_snapshot,
+    validate_rgb_freshness,
     visual_tolerances,
 )
 from servo_cup_edge_xy import JOINT_NAMES, ServoNode, adaptive_parameters, cap_norm
@@ -39,7 +41,10 @@ from servo_cup_edge_xy import JOINT_NAMES, ServoNode, adaptive_parameters, cap_n
 
 SNAPSHOT_URL = "http://127.0.0.1:18080/snapshot.npz"
 GRIPPER_ACTION = "/left/gripper/robotiq_gripper_controller/gripper_cmd"
-TARGET = np.asarray([293.905848, 167.921509], dtype=float)
+# Median horizontal target of the two confirmed real cup grasps.  The old
+# symmetric soft window accepted u=298.68, where the fingers missed outside
+# the rim and pushed the cup away.
+TARGET = np.asarray([292.5, 167.921509], dtype=float)
 REFERENCE_Z = 0.596413
 DESCENT_M = 0.340
 GRASP_Z = REFERENCE_Z - DESCENT_M
@@ -134,7 +139,28 @@ def snapshot_rgb(expected_session_id=None):
             image_shape=rgb.shape,
             expected_session_id=expected_session_id,
         )
+        validate_rgb_freshness(
+            age_s=sample["rgb_age_s"].item(),
+            sequence=sample["rgb_sequence"].item(),
+        )
         return rgb, float(sample["rgb_stamp"]), session_id
+
+
+def advancing_preflight_snapshot(timeout_s=2.0):
+    """Prove the persistent viewer advances before any gripper/arm motion."""
+    _first_rgb, first_stamp, session_id = snapshot_rgb()
+    deadline = time.monotonic() + float(timeout_s)
+    last_error = "RGB timestamp did not advance"
+    while time.monotonic() < deadline:
+        try:
+            rgb, stamp, confirmed_session = snapshot_rgb(session_id)
+            if stamp > first_stamp + 1e-6:
+                return rgb, stamp, confirmed_session
+            last_error = f"RGB timestamp stayed at {stamp:.9f}"
+        except Exception as exc:
+            last_error = repr(exc)
+        time.sleep(0.03)
+    raise RuntimeError(f"left-wrist camera preflight failed: {last_error}")
 
 
 def cup_right_once(bgr):
@@ -405,7 +431,9 @@ def recover_best_visual_pose(arm, best, stamp, camera_session_id, iterations, re
         # The cached observation was captured at this exact joint pose.  A
         # transient missed frame must not discard an already usable alignment.
         emit("best_pose_confirmation_unavailable", reason=reason, error=str(exc))
-    if float(np.max(np.abs(best["error"]))) <= MAX_RECOVERABLE_VISUAL_ERROR_PX:
+    if cup_grasp_alignment_accepted(
+        best["error"], MAX_RECOVERABLE_VISUAL_ERROR_PX, confirmation=True
+    ):
         emit(
             "aligned_best_recovered",
             point_px=best["point"].tolist(),
@@ -433,7 +461,7 @@ def calibrate(arm, camera_session_id, preflight_stamp):
     emit("observe", stage="initial", point_px=p0.tolist(), target_px=TARGET.tolist(), spread_px=first["spread_px"])
     initial_error = TARGET - p0
     initial_tolerance = visual_tolerance(first)
-    if float(np.max(np.abs(initial_error))) <= initial_tolerance:
+    if cup_grasp_alignment_accepted(initial_error, initial_tolerance):
         emit("aligned_near", point_px=p0.tolist(), error_px=initial_error.tolist(), tolerance_px=initial_tolerance, reason="initial_within_detector_resolution")
         return {"point": p0, "error": initial_error, "iterations": 0, "mode": "initial_soft_accept"}
 
@@ -488,7 +516,7 @@ def calibrate(arm, camera_session_id, preflight_stamp):
     for iteration in range(1, 17):
         error = TARGET - current_point
         tolerance = visual_tolerance(current_observation)
-        if float(np.max(np.abs(error))) <= tolerance:
+        if cup_grasp_alignment_accepted(error, tolerance):
             confirm = detect_cup_right(
                 previous_stamp=stamp,
                 expected_session_id=camera_session_id,
@@ -498,7 +526,9 @@ def calibrate(arm, camera_session_id, preflight_stamp):
             stamp = confirm["stamp"]
             final_error = TARGET - confirm["point"]
             hold_tolerance = min(8.0, max(tolerance, visual_tolerance(confirm)) + 1.0)
-            if float(np.max(np.abs(final_error))) <= hold_tolerance:
+            if cup_grasp_alignment_accepted(
+                final_error, hold_tolerance, confirmation=True
+            ):
                 emit("aligned", iteration=iteration - 1, point_px=confirm["point"].tolist(), error_px=final_error.tolist(), tolerance_px=hold_tolerance, reason="confirmed_with_hysteresis")
                 return {"point": confirm["point"], "error": final_error, "iterations": iteration - 1, "mode": "confirmed_soft_accept"}
             current_point = confirm["point"]
@@ -747,7 +777,7 @@ def main():
     try:
         arm.wait_ready()
         phase = "CAMERA_PREFLIGHT"
-        _preflight_rgb, camera_preflight_stamp, camera_session_id = snapshot_rgb()
+        _preflight_rgb, camera_preflight_stamp, camera_session_id = advancing_preflight_snapshot()
         emit(
             "camera_verified",
             role="left_wrist",

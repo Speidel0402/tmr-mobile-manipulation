@@ -167,11 +167,60 @@ exec ros2 launch franka_fr3_arm_controllers franka_fr3_arm_controllers.launch.py
 "@
 Wait-Startup 'Arms'
 
+Start-RemoteWindow -Title 'Left FK IK' -HostConfig $robotHost -Command @"
+$robotEnvironment
+if pgrep -f '[s]tart_left_ik_service.py' >/dev/null; then
+  if ros2 service list 2>/dev/null | grep -qx '/left_ik/compute_fk' && \
+     ros2 service list 2>/dev/null | grep -qx '/left_ik/compute_cartesian_path'; then
+    echo 'Reusing healthy left-arm FK/IK geometry service.'
+    exec bash
+  fi
+  echo 'Left-arm FK/IK process exists without geometry services; restarting it.'
+  pkill -INT -f '[s]tart_left_ik_service.py' 2>/dev/null || true
+  for attempt in {1..30}; do
+    pgrep -f '[s]tart_left_ik_service.py' >/dev/null || break
+    sleep 0.1
+  done
+  pkill -TERM -f '[m]ove_group.*-r __ns:=/left_ik' 2>/dev/null || true
+fi
+cd ~/tmr-mobile-manipulation
+exec python3 grasp/scripts/start_left_ik_service.py
+"@
+Wait-Startup 'LeftIk'
+
+Invoke-Remote -Title 'Left FK IK readiness' -HostConfig $robotHost -Command @"
+$robotEnvironment
+set -e
+for attempt in {1..30}; do
+  services=`$(ros2 service list 2>/dev/null || true)
+  if grep -qx '/left_ik/compute_fk' <<<"`$services" && \
+     grep -qx '/left_ik/compute_cartesian_path' <<<"`$services"; then
+    echo 'Left-arm FK and Cartesian-path services are ready.'
+    exit 0
+  fi
+  sleep 1
+done
+echo 'Timed out waiting for left-arm FK/IK services.' >&2
+exit 74
+"@
+
 Start-RemoteWindow -Title 'D405 Duo' -HostConfig $robotHost -Command @"
 $robotEnvironment
 if pgrep -f '[r]s_multi_camera_launch.py|[r]ealsense2_camera_node' >/dev/null; then
-  echo 'D405 cameras already appear to be running.'
-  exec bash
+  if [[ "`$(ros2 param get /wrist_camera_left serial_no 2>/dev/null)" == 'String value is: _$($config.D405.LeftSerial)' ]] && \
+     [[ "`$(ros2 param get /wrist_camera_right serial_no 2>/dev/null)" == 'String value is: _$($config.D405.RightSerial)' ]] && \
+     timeout 3 ros2 topic echo --once --qos-reliability best_effort /wrist_camera_left/color/image_raw >/dev/null 2>&1 && \
+     timeout 3 ros2 topic echo --once --qos-reliability best_effort /wrist_camera_right/color/image_raw >/dev/null 2>&1; then
+    echo 'Reusing healthy serial-bound D405 cameras with fresh RGB frames.'
+    exec bash
+  fi
+  echo 'Existing D405 service is stale or bound incorrectly; restarting only the D405 pair.'
+  pkill -INT -f '[r]os2 launch realsense2_camera rs_multi_camera_launch.py' 2>/dev/null || true
+  for attempt in {1..30}; do
+    pgrep -f '[r]s_multi_camera_launch.py|[r]ealsense2_camera_node.*__node:=wrist_camera_' >/dev/null || break
+    sleep 0.1
+  done
+  pkill -TERM -f '[r]ealsense2_camera_node.*__node:=wrist_camera_' 2>/dev/null || true
 fi
 exec ros2 launch realsense2_camera rs_multi_camera_launch.py \
   camera_namespace1:='/' camera_name1:=wrist_camera_left serial_no1:=_$($config.D405.LeftSerial) \
@@ -189,6 +238,44 @@ set -e
 timeout 12 ros2 topic echo --once --qos-reliability best_effort /wrist_camera_left/color/image_raw >/dev/null
 timeout 12 ros2 topic echo --once --qos-reliability best_effort /wrist_camera_right/color/image_raw >/dev/null
 echo 'Both serial-bound D405 RGB streams are fresh.'
+"@
+
+Start-RemoteWindow -Title 'Left Wrist Snapshot' -HostConfig $robotHost -Command @"
+$robotEnvironment
+cd ~/tmr-mobile-manipulation
+if curl -fsS --max-time 2 http://127.0.0.1:18080/healthz 2>/dev/null | \
+   python3 -c "import json,sys; d=json.load(sys.stdin); assert d['status']=='ok' and d['camera_role']=='left_wrist' and d['rgb_topic']=='/wrist_camera_left/color/image_raw' and d['rgb_sequence']>0"; then
+  echo 'Left-wrist snapshot service is already healthy.'
+  exec bash
+fi
+pkill -INT -f '[c]amera_mjpeg_viewer.py.*--port 18080' 2>/dev/null || true
+for attempt in {1..20}; do
+  pgrep -f '[c]amera_mjpeg_viewer.py.*--port 18080' >/dev/null || break
+  sleep 0.1
+done
+exec python3 tools/camera_mjpeg_viewer.py \
+  --port 18080 --camera-role left_wrist \
+  --rgb-topic /wrist_camera_left/color/image_raw \
+  --depth-topic /wrist_camera_left/depth/image_rect_raw \
+  --camera-info-topic /wrist_camera_left/color/camera_info \
+  --title Left_Wrist_D405
+"@
+Wait-Startup 'WristSnapshot'
+
+Invoke-Remote -Title 'Left wrist snapshot readiness' -HostConfig $robotHost -Command @"
+set -e
+for attempt in {1..20}; do
+  first=`$(curl -fsS --max-time 2 http://127.0.0.1:18080/healthz 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['rgb_sequence'])" 2>/dev/null || echo 0)
+  sleep 0.15
+  second=`$(curl -fsS --max-time 2 http://127.0.0.1:18080/healthz 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['rgb_sequence'])" 2>/dev/null || echo 0)
+  if (( first > 0 && second > first )); then
+    echo "Left-wrist RGB snapshot service is fresh and advancing (`$first -> `$second)."
+    exit 0
+  fi
+  sleep 0.5
+done
+echo 'Timed out waiting for left-wrist snapshot service.' >&2
+exit 75
 "@
 
 # Acquire the adapter lease with a zero target; never publish beside the

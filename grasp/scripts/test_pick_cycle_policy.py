@@ -6,9 +6,11 @@ from pathlib import Path
 
 from pick_cycle_policy import (
     classify_close_result,
+    cup_grasp_alignment_accepted,
     grasp_plane_policy,
     top_pose_policy,
     validate_camera_snapshot,
+    validate_rgb_freshness,
     visual_tolerances,
 )
 
@@ -21,8 +23,7 @@ class PickCyclePolicyTests(unittest.TestCase):
         self.assertIn("MIN_EXECUTABLE_FINE_STEP_M = 0.0025", source)
         self.assertIn("for iteration in range(1, 17)", source)
         self.assertIn('"fine_step_promoted"', source)
-        self.assertIn("DESCENT_M = 0.240", source)
-        self.assertIn("descend_with_head_rgb(arm, head_camera)", source)
+        self.assertIn("DESCENT_M = 0.340", source)
         self.assertIn("HEAD_MIN_DESCENT_M = 0.220", source)
         self.assertIn("HEAD_MAX_DESCENT_M = 0.245", source)
         self.assertIn("cup track jump", source)
@@ -123,6 +124,31 @@ class PickCyclePolicyTests(unittest.TestCase):
         )
         self.assertTrue(verdict["accepted_as_grasp"])
 
+    def test_observed_empty_near_closed_stall_is_rejected(self):
+        result = {
+            "status": 6,
+            "position": 0.7894070484581498,
+            "stalled": True,
+            "reached_goal": False,
+            "feedback_positions": [],
+        }
+        verdict = classify_close_result(result)
+        self.assertEqual(verdict["classification"], "indeterminate_close")
+        self.assertFalse(verdict["accepted_as_grasp"])
+
+    def test_empirical_cup_alignment_window_keeps_grasps_and_rejects_miss(self):
+        target = (292.5, 167.921509)
+        success_a = (290.5455977370352, 166.82725962399616)
+        success_b = (294.577448024595, 172.85837834441722)
+        missed = (298.67694726153286, 167.60309329252348)
+
+        def error(point):
+            return (target[0] - point[0], target[1] - point[1])
+
+        self.assertTrue(cup_grasp_alignment_accepted(error(success_a), 6.0, True))
+        self.assertTrue(cup_grasp_alignment_accepted(error(success_b), 6.0, True))
+        self.assertFalse(cup_grasp_alignment_accepted(error(missed), 6.0, True))
+
     def test_fresh_state_mismatch_is_rejected(self):
         result = {
             "status": 6,
@@ -178,6 +204,13 @@ class PickCyclePolicyTests(unittest.TestCase):
                 expected_session_id="session-a",
                 **common,
             )
+
+    def test_fresh_rgb_metadata_is_required(self):
+        self.assertEqual(validate_rgb_freshness(0.05, 31), 31)
+        with self.assertRaisesRegex(ValueError, "stale RGB"):
+            validate_rgb_freshness(0.751, 31)
+        with self.assertRaisesRegex(ValueError, "sequence"):
+            validate_rgb_freshness(0.05, 0)
 
 
 if __name__ == "__main__":

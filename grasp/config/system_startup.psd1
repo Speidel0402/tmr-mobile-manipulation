@@ -13,7 +13,9 @@
         Spine = 5
         Grippers = 7
         Arms = 12
+        LeftIk = 5
         D405 = 8
+        WristSnapshot = 3
     }
 
     D405 = @{

@@ -8,6 +8,19 @@ STATUS_SUCCEEDED = 4
 STATUS_ABORTED = 6
 
 
+def validate_rgb_freshness(age_s, sequence, maximum_age_s=0.75):
+    """Reject a live-looking HTTP cache that is not receiving ROS frames."""
+    age = float(age_s)
+    frame_sequence = int(sequence)
+    if not math.isfinite(age) or age < 0.0 or age > float(maximum_age_s):
+        raise ValueError(
+            f"stale RGB frame: age={age!r}s, maximum={float(maximum_age_s):.3f}s"
+        )
+    if frame_sequence <= 0:
+        raise ValueError(f"invalid RGB frame sequence: {frame_sequence}")
+    return frame_sequence
+
+
 def validate_camera_snapshot(
     *,
     role,
@@ -114,6 +127,26 @@ def visual_tolerances(spread_px):
     enter = min(7.0, max(5.0, 2.0 * spread + 1.0))
     hold = min(8.0, enter + 2.0)
     return {"enter_px": float(enter), "hold_px": float(hold)}
+
+
+def cup_grasp_alignment_accepted(error_px, vertical_tolerance_px, confirmation=False):
+    """Use the empirical cup-contact window, not a circular image threshold.
+
+    The gripper misses on the outside of the cup when the detected right rim
+    is too far right in the image.  Two confirmed real grasps landed at
+    u=290.55 and u=294.58, while the observed miss landed at u=298.68 and
+    pushed the cup away.  Keep a narrow horizontal window but retain the
+    detector-derived vertical tolerance because vertical pixel noise did not
+    correlate with the missed contact.
+    """
+    values = [float(value) for value in error_px]
+    if len(values) != 2 or not all(math.isfinite(value) for value in values):
+        return False
+    horizontal_limit = 3.0 if confirmation else 2.5
+    return (
+        abs(values[0]) <= horizontal_limit
+        and abs(values[1]) <= float(vertical_tolerance_px)
+    )
 
 
 def top_pose_policy(z_error_m, orientation_error_deg):

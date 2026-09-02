@@ -44,6 +44,17 @@ def tasks(cup="B", bowl="A", plate="D"):
 
 
 class ThreeObjectDeliveryContracts(unittest.TestCase):
+    def test_arm_local_execution_does_not_require_self_ssh(self):
+        with (
+            mock.patch.object(mission.sys, "platform", "linux"),
+            mock.patch.object(mission, "REPO_ROOT", Path("/home/aup/tmr-mobile-manipulation")),
+        ):
+            command = mission.remote_arm_argv(
+                config(), "grasp/scripts/initialize_dual_arm_pick_pose.py", ["--execute"]
+            )
+        self.assertEqual(command[:2], ["bash", "-lc"])
+        self.assertNotIn("ssh", command)
+
     def test_default_assignment_and_object_specific_depths(self):
         values = tasks()
         self.assertEqual(mission.assignment(values), {"cup": "B", "bowl": "A", "plate": "D"})

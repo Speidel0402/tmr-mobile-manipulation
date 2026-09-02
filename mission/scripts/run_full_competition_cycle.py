@@ -41,11 +41,33 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RIGHT_STAGE_1_M = 0.80
 RIGHT_STAGE_2_M = 0.85
 PLACE_DESCENT_M = 0.255
+SPINE_HOME_M = 0.7
+RIGHT_PARKING_TARGET = (
+    -1.3082223883915827,
+    -1.221499396341589,
+    0.4977228788663176,
+    -2.8806021162096016,
+    -0.4502475342569809,
+    2.1810914572975415,
+    1.1374866925775369,
+)
+RIGHT_PARKING_TOLERANCE_RAD = 0.006
+LEFT_PICK_TOP_TARGET = (
+    -1.71976900100708,
+    -1.6329213380813599,
+    1.8240526914596558,
+    -2.447446823120117,
+    2.177191972732544,
+    0.8496646285057068,
+    -3.05077862739563,
+)
+LEFT_PICK_TOP_TOLERANCE_RAD = 0.006
 
 
 class Phase(str, Enum):
     CREATED = "CREATED"
     INITIALIZING_DUAL_ARMS = "INITIALIZING_DUAL_ARMS"
+    INITIALIZING_SPINE = "INITIALIZING_SPINE"
     DUAL_ARMS_READY = "DUAL_ARMS_READY"
     OUTBOUND_BASE_RUNNING = "OUTBOUND_BASE_RUNNING"
     AT_PICKUP = "AT_PICKUP"
@@ -116,6 +138,14 @@ def initialization_argv(config: FullConfig) -> list[str]:
     )
 
 
+def spine_initialization_argv(config: FullConfig) -> list[str]:
+    return arm_argv(
+        config,
+        "grasp/scripts/initialize_spine_height.py",
+        ["--execute", "--target-m", f"{SPINE_HOME_M:.3f}"],
+    )
+
+
 def pick_argv(config: FullConfig) -> list[str]:
     return arm_argv(
         config,
@@ -154,12 +184,51 @@ def place_argv(config: FullConfig) -> list[str]:
 
 
 def init_report_is_stable(report: dict | None) -> bool:
+    if not isinstance(report, dict) or report.get("status") != "success":
+        return False
+    arm_reports = report.get("reports", [])
+    if report.get("order") != ["right", "left"] or len(arm_reports) != 2:
+        return False
+    right, left = arm_reports
+    right_target = right.get("target_joint_positions_rad", [])
+    right_measured = right.get("measured_joint_positions_rad", [])
+    right_at_parking_target = bool(
+        len(right_target) == len(right_measured) == 7
+        and max(abs(float(value) - expected) for value, expected in zip(right_target, RIGHT_PARKING_TARGET))
+        <= 1e-9
+        and max(abs(float(value) - expected) for value, expected in zip(right_measured, RIGHT_PARKING_TARGET))
+        <= RIGHT_PARKING_TOLERANCE_RAD
+    )
+    left_target = left.get("target_joint_positions_rad", [])
+    left_measured = left.get("measured_joint_positions_rad", [])
+    left_at_pick_top_target = bool(
+        len(left_target) == len(left_measured) == 7
+        and max(abs(float(value) - expected) for value, expected in zip(left_target, LEFT_PICK_TOP_TARGET))
+        <= 1e-9
+        and max(abs(float(value) - expected) for value, expected in zip(left_measured, LEFT_PICK_TOP_TARGET))
+        <= LEFT_PICK_TOP_TOLERANCE_RAD
+    )
+    return bool(
+        report.get("both_stable_hold") is True
+        and report.get("gripper_commanded") is False
+        and right.get("arm") == "right"
+        and right.get("moved") is True
+        and right.get("stable_hold") is True
+        and left.get("arm") == "left"
+        and left.get("moved") is True
+        and left.get("stable_hold") is True
+        and right_at_parking_target
+        and left_at_pick_top_target
+    )
+
+
+def spine_report_is_stable(report: dict | None) -> bool:
     return bool(
         isinstance(report, dict)
         and report.get("status") == "success"
-        and report.get("both_stable_hold") is True
-        and report.get("gripper_commanded") is False
-        and len(report.get("reports", [])) == 2
+        and report.get("moved") is True
+        and abs(float(report.get("target_position_m", -1.0)) - SPINE_HOME_M) <= 1e-9
+        and abs(float(report.get("measured_position_m", -1.0)) - SPINE_HOME_M) <= 0.003
     )
 
 
@@ -199,7 +268,7 @@ def strategy(config: FullConfig, checkpoint_path: Path) -> dict:
         "motion_enabled": False,
         "entrypoint": "mission/scripts/run_full_competition_cycle.py",
         "phases": [
-            "dual arms -> unified pick-start pose; grippers untouched",
+            "startup: reset both arm joints -> restore spine to 0.70 m -> keep right inward parking and left calibrated pick-top hold",
             "outbound: forward 0.85 m -> clockwise 90 deg -> live doorway midpoint -> door crossing 1.20 m",
             "pick: open left gripper -> force left top restore -> visual align -> descend 0.24 m -> close -> lift",
             "return: reverse 1.70 m -> counter-clockwise 180 deg -> reverse 0.25 m",
@@ -236,6 +305,7 @@ def run(args: argparse.Namespace) -> int:
 
     required = [
         "grasp/scripts/initialize_dual_arm_pick_pose.py",
+        "grasp/scripts/initialize_spine_height.py",
         "grasp/scripts/run_streamed_live_pick_cycle.py",
         "grasp/scripts/run_streamed_live_place_cycle.py",
     ]
@@ -274,6 +344,24 @@ def run_locked(args: argparse.Namespace, config: FullConfig) -> int:
             raise MissionError("dual-arm initialization did not prove two stable holds")
         current_phase = Phase.DUAL_ARMS_READY
         save_checkpoint(args.checkpoint, run_id, current_phase, init_report=report)
+
+        current_phase = Phase.INITIALIZING_SPINE
+        save_checkpoint(args.checkpoint, run_id, current_phase)
+        result = run_streamed_command(
+            "spine-init",
+            spine_initialization_argv(config),
+            config.init_timeout_s,
+            log_dir / "spine_init.log",
+        )
+        spine_report = extract_last_json_object(result.output)
+        if result.returncode != 0 or not spine_report_is_stable(spine_report):
+            raise MissionError("spine initialization did not prove the 0.70 m height")
+        save_checkpoint(
+            args.checkpoint,
+            run_id,
+            current_phase,
+            spine_report=spine_report,
+        )
 
         current_phase = Phase.OUTBOUND_BASE_RUNNING
         save_checkpoint(args.checkpoint, run_id, current_phase)

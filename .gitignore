@@ -11,6 +11,8 @@ install/
 log/
 logs/
 outputs/
+artifacts/
+/config/zed_letters_override.yaml
 *.log
 *.bag
 *.db3
@@ -29,4 +31,3 @@ Thumbs.db
 .env.*
 !*example*
 config/local_*
-

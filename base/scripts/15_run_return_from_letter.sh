@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 set -eo pipefail
-
-# ROS setup scripts probe optional unset variables; enable nounset afterwards.
 source /opt/ros/humble/setup.bash
 source "${HOME}/ros2_ws/install/setup.bash"
 source "${HOME}/tmr_navigation/install/setup.bash"
@@ -13,8 +11,5 @@ export PYTHONUNBUFFERED=1
 if [[ -f "${HOME}/cyclonedds.xml" ]]; then
   export CYCLONEDDS_URI="file://${HOME}/cyclonedds.xml"
 fi
-set -u
-
-cd "${HOME}/tmr_cycle"
-exec flock -n /tmp/tmr_post_grasp_route.lock \
-  python3 scripts/13_post_grasp_route.py "$@"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec python3 "${root}/scripts/15_return_from_letter.py" "$@"

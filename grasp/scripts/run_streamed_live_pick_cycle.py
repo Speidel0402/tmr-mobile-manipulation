@@ -17,8 +17,16 @@ from geometry_msgs.msg import Pose
 from moveit_msgs.srv import GetCartesianPath
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CompressedImage
 
 from cup_rim_detector import detect_green_cup_right
+from head_rgb_descent import (
+    detect_flange_edge_y,
+    detect_target_cup,
+    estimate_remaining_down_m,
+    target_flange_edge_y,
+)
 from pick_cycle_policy import (
     classify_close_result,
     grasp_plane_policy,
@@ -33,8 +41,14 @@ SNAPSHOT_URL = "http://127.0.0.1:18080/snapshot.npz"
 GRIPPER_ACTION = "/left/gripper/robotiq_gripper_controller/gripper_cmd"
 TARGET = np.asarray([293.905848, 167.921509], dtype=float)
 REFERENCE_Z = 0.596413
-DESCENT_M = 0.240
+DESCENT_M = 0.340
 GRASP_Z = REFERENCE_Z - DESCENT_M
+HEAD_CAMERA_TOPIC = "/head_camera/zed/rgb/color/rect/image/compressed"
+HEAD_COARSE_DESCENT_M = 0.180
+HEAD_PROBE_DESCENT_M = 0.020
+HEAD_FALLBACK_DESCENT_M = 0.240
+HEAD_MIN_DESCENT_M = 0.220
+HEAD_MAX_DESCENT_M = 0.245
 MAX_RECOVERABLE_VISUAL_ERROR_PX = 11.0
 MIN_EXECUTABLE_FINE_STEP_M = 0.0025
 MAX_HIGH_GRASP_PLANE_RESIDUAL_M = 0.020
@@ -62,6 +76,37 @@ REFERENCE_JOINTS = np.asarray(
 
 def emit(event, **values):
     print("PICK=" + json.dumps({"event": event, **values}, separators=(",", ":")), flush=True)
+
+
+class HeadRgbObserver(Node):
+    def __init__(self):
+        super().__init__("pick_head_rgb_descent_observer")
+        self.frame = None
+        self.stamp_ns = 0
+        self.create_subscription(
+            CompressedImage,
+            HEAD_CAMERA_TOPIC,
+            self._on_image,
+            qos_profile_sensor_data,
+        )
+
+    def _on_image(self, message):
+        frame = cv2.imdecode(
+            np.frombuffer(bytes(message.data), np.uint8), cv2.IMREAD_COLOR
+        )
+        if frame is not None:
+            self.frame = frame
+            self.stamp_ns = int(message.header.stamp.sec) * 1_000_000_000 + int(
+                message.header.stamp.nanosec
+            )
+
+    def fresh(self, previous_stamp_ns=0, timeout_s=5.0):
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            if self.frame is not None and self.stamp_ns > int(previous_stamp_ns):
+                return self.frame.copy(), self.stamp_ns
+        raise RuntimeError("fresh head ZED RGB frame unavailable")
 
 
 def snapshot_rgb(expected_session_id=None):
@@ -202,24 +247,17 @@ def close_result_is_real(result, open_position=0.0, close_position=0.8):
     )
 
 
-def close_gripper_with_retry(node):
-    history = []
-    for attempt in range(1, 3):
-        if attempt > 1:
-            reset = command_gripper(node, 0.0, "open_reset_before_close_retry")
-            history.append({"attempt": attempt, "reset": reset})
-            if reset["position"] > 0.05:
-                raise RuntimeError("gripper close retry reset did not reach open position")
-            time.sleep(0.15)
-        result = command_gripper(node, 0.8, f"close_after_descent_attempt_{attempt}")
-        valid, progress, verdict = close_result_is_real(result)
-        result["close_progress"] = progress
-        result["verdict"] = verdict
-        history.append({"attempt": attempt, "close": result})
-        emit("close_verdict", attempt=attempt, valid=valid, progress=progress, verdict=verdict)
-        if valid:
-            return result, history
-    raise RuntimeError("gripper failed to produce real closing motion: " + repr(history))
+def close_gripper_once(node):
+    """Close once after descent; never reopen and disturb the target."""
+    result = command_gripper(node, 0.8, "close_after_fixed_descent")
+    valid, progress, verdict = close_result_is_real(result)
+    result["close_progress"] = progress
+    result["verdict"] = verdict
+    history = [{"attempt": 1, "close": result}]
+    emit("close_verdict", attempt=1, valid=valid, progress=progress, verdict=verdict)
+    if not valid:
+        raise RuntimeError("single close did not confirm object contact: " + repr(history))
+    return result, history
 
 
 def top_errors(pose):
@@ -492,7 +530,7 @@ def calibrate(arm, camera_session_id, preflight_stamp):
 
 
 def move_vertical(arm, delta_z):
-    if not -0.35 <= delta_z <= 0.35:
+    if not -0.38 <= delta_z <= 0.38:
         raise RuntimeError("vertical delta outside limit")
     arm.max_joint_velocity = 0.10
     q0 = list(arm.q)
@@ -525,6 +563,95 @@ def move_vertical(arm, delta_z):
     return end, actual
 
 
+def descend_with_head_rgb(arm, head_camera):
+    """Coarse descend, estimate Z from the visible flange, then refine."""
+    total_actual = 0.0
+    stamp_ns = 0
+    try:
+        top_frame, stamp_ns = head_camera.fresh()
+        cup = detect_target_cup(top_frame)
+        desired_edge_y = target_flange_edge_y(cup)
+        emit(
+            "head_z_cup",
+            cup=cup,
+            desired_flange_edge_y_px=desired_edge_y,
+        )
+    except Exception as exc:
+        emit(
+            "head_z_fallback",
+            stage="top_detection",
+            detail=repr(exc),
+            fallback_down_m=HEAD_FALLBACK_DESCENT_M,
+        )
+        return move_vertical(arm, -HEAD_FALLBACK_DESCENT_M)
+
+    low_pose, actual = move_vertical(arm, -HEAD_COARSE_DESCENT_M)
+    total_actual += actual
+    try:
+        coarse_frame, stamp_ns = head_camera.fresh(stamp_ns)
+        first_edge_y = detect_flange_edge_y(coarse_frame, cup)
+
+        low_pose, actual = move_vertical(arm, -HEAD_PROBE_DESCENT_M)
+        total_actual += actual
+        probe_frame, stamp_ns = head_camera.fresh(stamp_ns)
+        second_edge_y = detect_flange_edge_y(probe_frame, cup)
+        remaining_down_m, scale_px_per_m = estimate_remaining_down_m(
+            first_edge_y,
+            second_edge_y,
+            HEAD_PROBE_DESCENT_M,
+            desired_edge_y,
+        )
+        measured_total_m = -total_actual
+        desired_total_m = float(
+            np.clip(
+                measured_total_m + remaining_down_m,
+                HEAD_MIN_DESCENT_M,
+                HEAD_MAX_DESCENT_M,
+            )
+        )
+        correction_down_m = desired_total_m - measured_total_m
+        emit(
+            "head_z_solution",
+            first_edge_y_px=first_edge_y,
+            second_edge_y_px=second_edge_y,
+            desired_edge_y_px=desired_edge_y,
+            scale_px_per_m=scale_px_per_m,
+            measured_total_m=measured_total_m,
+            correction_down_m=correction_down_m,
+            desired_total_m=desired_total_m,
+        )
+        if abs(correction_down_m) >= 0.0015:
+            low_pose, actual = move_vertical(arm, -correction_down_m)
+            total_actual += actual
+        try:
+            final_frame, _ = head_camera.fresh(stamp_ns)
+            final_edge_y = detect_flange_edge_y(final_frame, cup)
+            emit(
+                "head_z_verified",
+                final_edge_y_px=final_edge_y,
+                desired_edge_y_px=desired_edge_y,
+                residual_px=final_edge_y - desired_edge_y,
+                total_down_m=-total_actual,
+            )
+        except Exception as verify_exc:
+            emit("head_z_verify_soft_failure", detail=repr(verify_exc))
+        return low_pose, total_actual
+    except Exception as exc:
+        measured_total_m = -total_actual
+        fallback_correction_m = HEAD_FALLBACK_DESCENT_M - measured_total_m
+        emit(
+            "head_z_fallback",
+            stage="low_probe",
+            detail=repr(exc),
+            measured_total_m=measured_total_m,
+            fallback_correction_m=fallback_correction_m,
+        )
+        if abs(fallback_correction_m) >= 0.0015:
+            low_pose, actual = move_vertical(arm, -fallback_correction_m)
+            total_actual += actual
+        return low_pose, total_actual
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -536,6 +663,7 @@ def main():
     rclpy.init()
     arm = ServoNode()
     gripper = Node("streamed_ordered_left_pick")
+    head_camera = HeadRgbObserver()
     impedance_off = False
     top_z = None
     failure = None
@@ -597,40 +725,23 @@ def main():
         phase = "ALIGNED"
         emit("order_confirmed", completed="visual_alignment", next="descend", final_error_px=alignment["error"].tolist())
 
-        requested_down = GRASP_Z - top_z
-        if not -0.35 <= requested_down < -0.20:
-            raise RuntimeError(f"grasp-plane delta outside automatic range: {requested_down:.6f}m")
         phase = "DESCENDING"
-        low_pose, down_actual = move_vertical(arm, requested_down)
-        low_error = float(low_pose.position.z) - GRASP_Z
-        if abs(low_error) > 0.003 and abs(low_error) <= 0.012:
-            low_pose, correction = move_vertical(arm, -low_error)
-            down_actual += correction
-            low_error = float(low_pose.position.z) - GRASP_Z
-            emit("grasp_plane_corrected", residual_m=low_error)
-        plane_policy = grasp_plane_policy(
-            low_error,
-            nominal_tolerance_m=0.012,
-            high_limit_m=MAX_HIGH_GRASP_PLANE_RESIDUAL_M,
-        )
-        if plane_policy == "accept_high":
-            # The Franka PTP action can soft-complete a few joint milliradians
-            # early.  On this calibrated approach that maps to roughly
-            # 9--15 mm above the nominal cup plane.  The successful physical
-            # grasp tolerates that high-side residual; never apply the same
-            # relaxation below the table-side target.
-            emit(
-                "grasp_plane_high_soft_accept",
-                residual_m=low_error,
-                limit_m=MAX_HIGH_GRASP_PLANE_RESIDUAL_M,
+        low_pose, down_actual = move_vertical(arm, -DESCENT_M)
+        measured_down_m = -float(down_actual)
+        if abs(measured_down_m - DESCENT_M) > 0.008:
+            raise RuntimeError(
+                f"fixed descent did not reach {DESCENT_M:.3f}m: {measured_down_m:.6f}m"
             )
-        elif plane_policy == "reject":
-            raise RuntimeError(f"grasp plane remained outside recoverable range: {low_error:.6f}m")
         phase = "AT_LOW"
-        emit("order_confirmed", completed="descend", next="close", down_actual_m=down_actual)
+        emit(
+            "order_confirmed",
+            completed=f"fixed_{DESCENT_M:.3f}m_descent",
+            next="close",
+            down_actual_m=down_actual,
+        )
 
         phase = "CLOSING"
-        closed, close_history = close_gripper_with_retry(gripper)
+        closed, close_history = close_gripper_once(gripper)
         phase = "GRASP_VERIFIED"
         emit("order_confirmed", completed="close", next="lift")
 
@@ -655,7 +766,7 @@ def main():
                 phase = "RECOVER_LIFT"
                 current = arm.fk(list(arm.q))
                 recovery = top_z - float(current.position.z)
-                if 0.00075 < recovery <= 0.35:
+                if 0.00075 < recovery <= 0.38:
                     move_vertical(arm, recovery)
                 phase = "RECOVERED_AT_TOP"
                 emit("internal_fault_recovery_complete", failed_phase=failed_phase)
@@ -680,6 +791,7 @@ def main():
                     failure = "controller hold recovery failed: " + repr(exc)
         arm.destroy_node()
         gripper.destroy_node()
+        head_camera.destroy_node()
         rclpy.shutdown()
     if failure:
         raise RuntimeError(failure)

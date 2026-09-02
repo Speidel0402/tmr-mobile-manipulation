@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import time
 
@@ -83,7 +84,7 @@ def command_open(node: Node) -> dict:
     raise RuntimeError("gripper did not verify open at the placement plane: " + repr(history))
 
 
-def move_vertical_to(arm: ServoNode, target: Pose, label: str) -> dict:
+def move_cartesian_to(arm: ServoNode, target: Pose, label: str) -> dict:
     q0 = list(arm.q)
     start = arm.fk(q0)
     request = GetCartesianPath.Request()
@@ -109,15 +110,21 @@ def move_vertical_to(arm: ServoNode, target: Pose, label: str) -> dict:
     for _ in range(6):
         rclpy.spin_once(arm, timeout_sec=0.04)
     end = arm.fk(list(arm.q))
-    error = float(end.position.z - target.position.z)
-    if abs(error) > 0.018:
-        raise RuntimeError(f"{label} vertical endpoint error {error:+.6f} m")
+    error_xyz = [
+        float(end.position.x - target.position.x),
+        float(end.position.y - target.position.y),
+        float(end.position.z - target.position.z),
+    ]
+    error = math.sqrt(sum(value * value for value in error_xyz))
+    if error > 0.020:
+        raise RuntimeError(f"{label} Cartesian endpoint error {error:+.6f} m")
     record = {
         "label": label,
         "start_xyz": [float(start.position.x), float(start.position.y), float(start.position.z)],
         "target_xyz": [float(target.position.x), float(target.position.y), float(target.position.z)],
         "end_xyz": [float(end.position.x), float(end.position.y), float(end.position.z)],
-        "z_error_m": error,
+        "error_xyz_m": error_xyz,
+        "endpoint_error_m": error,
         "waypoints": len(path),
     }
     emit("vertical_complete", **record)
@@ -129,17 +136,34 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--fresh-start", action="store_true")
     parser.add_argument("--down-m", type=float, default=0.255)
+    parser.add_argument("--forward-m", type=float, default=0.0)
+    parser.add_argument("--placement-row", choices=("near", "far"), default="near")
     parser.add_argument(
         "--state-file",
         type=Path,
         default=Path("~/tmr-mobile-manipulation/state/place_cycle.json").expanduser(),
     )
     args = parser.parse_args()
-    if not 0.18 <= args.down_m <= 0.28:
-        raise RuntimeError("down-m outside confirmed placement range 0.18..0.28 m")
+    if not 0.18 <= args.down_m <= 0.38:
+        raise RuntimeError("down-m outside placement range 0.18..0.38 m")
+    if not 0.0 <= args.forward_m <= 0.20:
+        raise RuntimeError("forward-m outside bounded placement range 0.00..0.20 m")
+    if args.placement_row == "near" and args.forward_m > 0.005:
+        raise RuntimeError("near placement must use the already verified zero extension")
+    if args.placement_row == "far" and args.forward_m < 0.05:
+        raise RuntimeError("far placement requires an explicit bounded extension")
+    sequence = ["capture_current_top"]
+    if args.forward_m > 0.005:
+        sequence.append("extend_forward")
+    sequence.extend(["down", "open", "up"])
+    if args.forward_m > 0.005:
+        sequence.append("retract_to_captured_top")
+    sequence.append("stable_hold")
     summary = {
-        "sequence": ["capture_current_top", "down", "open", "up_to_captured_top", "stable_hold"],
+        "sequence": sequence,
         "down_m": float(args.down_m),
+        "forward_m": float(args.forward_m),
+        "placement_row": args.placement_row,
         "camera_required": False,
         "old_joint_restore_used": False,
     }
@@ -157,6 +181,7 @@ def main() -> int:
     impedance_off = False
     released = False
     top_target = None
+    staging_target = None
     phase = "INIT"
     operator_stop = False
     failure = None
@@ -176,14 +201,27 @@ def main() -> int:
         arm.set_impedance(False)
         impedance_off = True
         time.sleep(0.35)
+        staging_target = Pose()
+        staging_target.position.x = top_target.position.x + float(args.forward_m)
+        staging_target.position.y = top_target.position.y
+        staging_target.position.z = top_target.position.z
+        staging_target.orientation = top_target.orientation
+        if args.forward_m > 0.005:
+            phase = state["phase"] = "EXTENDING_TO_ROW"
+            write_state(args.state_file, state)
+            state["extension_report"] = move_cartesian_to(
+                arm, staging_target, "bounded_forward_extension"
+            )
+            phase = state["phase"] = "AT_EXTENDED_TOP"
+            write_state(args.state_file, state)
         low_target = Pose()
-        low_target.position.x = top_target.position.x
-        low_target.position.y = top_target.position.y
-        low_target.position.z = top_target.position.z - float(args.down_m)
-        low_target.orientation = top_target.orientation
+        low_target.position.x = staging_target.position.x
+        low_target.position.y = staging_target.position.y
+        low_target.position.z = staging_target.position.z - float(args.down_m)
+        low_target.orientation = staging_target.orientation
         phase = state["phase"] = "DESCENDING"
         write_state(args.state_file, state)
-        down_report = move_vertical_to(arm, low_target, "down_before_open")
+        down_report = move_cartesian_to(arm, low_target, "down_before_open")
         phase = state["phase"] = "AT_LOW_GRIPPER_STILL_CLOSED"
         state["down_report"] = down_report
         write_state(args.state_file, state)
@@ -198,8 +236,14 @@ def main() -> int:
 
         phase = state["phase"] = "LIFTING"
         write_state(args.state_file, state)
-        up_report = move_vertical_to(arm, top_target, "up_after_open")
+        up_report = move_cartesian_to(arm, staging_target, "up_after_open")
         state["up_report"] = up_report
+        if args.forward_m > 0.005:
+            phase = state["phase"] = "RETRACTING_AFTER_RELEASE"
+            write_state(args.state_file, state)
+            state["retraction_report"] = move_cartesian_to(
+                arm, top_target, "retract_to_captured_top"
+            )
         phase = state["phase"] = "DONE"
     except KeyboardInterrupt:
         operator_stop = True
@@ -213,6 +257,8 @@ def main() -> int:
         state["error"] = failure
         emit("failure", phase=failed_phase, detail=failure)
         if top_target is not None and failed_phase in {
+            "EXTENDING_TO_ROW",
+            "AT_EXTENDED_TOP",
             "DESCENDING",
             "AT_LOW_GRIPPER_STILL_CLOSED",
             "OPENING_AT_LOW",
@@ -221,9 +267,17 @@ def main() -> int:
         }:
             try:
                 current = arm.fk(list(arm.q))
-                if 0.00075 < top_target.position.z - current.position.z <= 0.28:
-                    move_vertical_to(arm, top_target, "bounded_fault_recovery_up")
-                    state["fault_recovery"] = "top_restored"
+                if staging_target is not None and 0.00075 < staging_target.position.z - current.position.z <= 0.38:
+                    move_cartesian_to(arm, staging_target, "bounded_fault_recovery_up")
+                current = arm.fk(list(arm.q))
+                distance_to_top = math.sqrt(
+                    (current.position.x - top_target.position.x) ** 2
+                    + (current.position.y - top_target.position.y) ** 2
+                    + (current.position.z - top_target.position.z) ** 2
+                )
+                if 0.00075 < distance_to_top <= 0.22:
+                    move_cartesian_to(arm, top_target, "bounded_fault_recovery_retract")
+                state["fault_recovery"] = "top_restored"
             except Exception as recovery_exc:
                 state["fault_recovery"] = repr(recovery_exc)
     finally:

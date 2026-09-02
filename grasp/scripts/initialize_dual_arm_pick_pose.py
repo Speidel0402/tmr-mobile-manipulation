@@ -2,7 +2,8 @@
 """Sequentially restore both FR3 arms to the unified pick-start posture.
 
 The left target is the calibrated successful pick-top pose.  The right target
-is the verified grasp initial pose.  No gripper command is sent by this script.
+is a raised, retracted parking pose. The right arm parks before the left arm
+enters its pick corridor. No gripper command is sent by this script.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 
 
-JOINT_HOLD_TOLERANCE_RAD = 0.018
+JOINT_HOLD_TOLERANCE_RAD = 0.006
 
 
 def emit(event: str, **values) -> None:
@@ -176,9 +177,15 @@ class ArmInitializer(Node):
         assert self.q is not None
         start = np.asarray(self.q, dtype=float)
         start_error = float(np.max(np.abs(start - self.target)))
-        if start_error <= 0.012:
-            emit("already_at_target", arm=self.arm_name, maximum_error_rad=start_error)
-            return self._stable_report(start, moved=False)
+        # Mission startup is an explicit reset, not a proximity check.  Send
+        # the configured PTP target for both arms on every fresh run so the
+        # physical startup posture is deterministic even when measured joints
+        # happen to be numerically close to it.
+        emit(
+            "reset_required",
+            arm=self.arm_name,
+            maximum_start_error_rad=start_error,
+        )
 
         self.gate()
         impedance_off = False
@@ -268,6 +275,14 @@ def load_targets(path: Path) -> dict[str, list[float]]:
     return targets
 
 
+def load_initialization_order(path: Path) -> tuple[str, str]:
+    value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    order = tuple(str(item) for item in value.get("initialization_order", ("right", "left")))
+    if len(order) != 2 or set(order) != {"left", "right"}:
+        raise RuntimeError(f"invalid initialization_order in {path}")
+    return order
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
@@ -279,9 +294,10 @@ def main() -> int:
     parser.add_argument("--maximum-velocity", type=float, default=0.06)
     args = parser.parse_args()
     targets = load_targets(args.config)
+    order = load_initialization_order(args.config)
     summary = {
         "status": "dry_run",
-        "order": ["left", "right"],
+        "order": list(order),
         "targets": targets,
         "gripper_commanded": False,
     }
@@ -292,7 +308,7 @@ def main() -> int:
     rclpy.init()
     reports = []
     try:
-        for arm_name in ("left", "right"):
+        for arm_name in order:
             emit("arm_start", arm=arm_name)
             node = ArmInitializer(arm_name, targets[arm_name], args.maximum_velocity)
             try:
@@ -303,7 +319,7 @@ def main() -> int:
                 node.destroy_node()
         result = {
             "status": "success",
-            "order": ["left", "right"],
+            "order": list(order),
             "reports": reports,
             "both_stable_hold": all(item["stable_hold"] for item in reports),
             "gripper_commanded": False,

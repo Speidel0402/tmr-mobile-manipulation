@@ -1,0 +1,32 @@
+{
+  "target": {
+    "letter": "B",
+    "row": "auto",
+    "alphabet": "ABE"
+  },
+  "search": {
+    "maximum_right_m": 2.4,
+    "search_speed_mps": 0.055,
+    "refine_speed_mps": 0.04,
+    "center_tolerance_norm": 0.055,
+    "stable_frames": 3,
+    "minimum_confidence": 0.22,
+    "row_split_y_norm": 0.52,
+    "camera_topic": "/head_camera/zed/rgb/color/rect/image/compressed"
+  },
+  "placement": {
+    "near": {
+      "forward_extension_m": 0.0,
+      "descent_m": 0.360
+    },
+    "far": {
+      "forward_extension_m": 0.16,
+      "descent_m": 0.360
+    }
+  },
+  "return": {
+    "turn_ccw_deg": 180.0,
+    "door_before_m": 0.5,
+    "door_forward_m": 1.2
+  }
+}

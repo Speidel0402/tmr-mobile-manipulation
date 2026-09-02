@@ -369,6 +369,32 @@ class ServoNode(Node):
         height_error = float(end.position.z - self.lock_z)
         if abs(height_error) > 0.002:
             raise RuntimeError(f"height drift {height_error:.6f}m")
+        measured_q = np.asarray(
+            [
+                end.orientation.x,
+                end.orientation.y,
+                end.orientation.z,
+                end.orientation.w,
+            ],
+            dtype=float,
+        )
+        locked_q = np.asarray(
+            [
+                self.lock_orientation.x,
+                self.lock_orientation.y,
+                self.lock_orientation.z,
+                self.lock_orientation.w,
+            ],
+            dtype=float,
+        )
+        dot = abs(float(np.dot(measured_q / np.linalg.norm(measured_q), locked_q / np.linalg.norm(locked_q))))
+        orientation_error_deg = math.degrees(
+            2.0 * math.acos(min(1.0, max(-1.0, dot)))
+        )
+        if orientation_error_deg > 1.5:
+            raise RuntimeError(
+                f"orientation drift {orientation_error_deg:.3f}deg"
+            )
         # Let the eye-in-hand camera finish mechanical settling and expose a
         # sharp frame before the next visual update.
         time.sleep(0.22)

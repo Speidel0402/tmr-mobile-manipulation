@@ -43,3 +43,30 @@ python3 mission/scripts/run_long_range_pick.py --execute --resume-grasp
 运行前需保证：底盘本地控制器、双雷达、SLAM、速度适配器已常驻；两台主机间已配置 SSH 密钥；机械臂主机的左臂、夹爪、D405、RGB 快照服务和 `left_ik` 服务已启动。RGB 快照必须由本版本 `tools/camera_mjpeg_viewer.py` 提供；抓取脚本会在张开夹爪前验证左腕相机、640×480 图像和本次相机会话，并在视觉校准期间拒绝相机进程切换。
 
 ROS 环境脚本必须先完成加载，随后才能启用 shell 的 `nounset` 严格检查；本版协调器已固定该顺序，避免 `AMENT_TRACE_SETUP_FILES: unbound variable` 在运动前中断。机械臂主机首次部署时允许创建 `/home/aup/tmr-mobile-manipulation`，并需保证该主机可用 SSH key 无交互连接 `tmr-user@172.16.0.50`。
+
+## 实机验证的自适应字母投放版本
+
+入口：`scripts/run_letter_delivery_competition.py`，参数集中在
+`config/letter_delivery.json`。可用 `--target-letter A|B|E` 临时覆盖目标，
+也可用 `--row near|far|auto` 指定或自动判断远近排。
+
+后段顺序固定为：已验证的退后/180°/后退前缀 → 最多向右 2.40 m 的
+ZED 白卡字母搜索 → 连续帧居中 → near 直接下降 0.36 m 放置，或 far
+前伸 0.16 m、下降 0.36 m 放置并回缩 → 按本轮实测右移距离等距向左 → 逆时针 180° →
+实时门中线 → 门前 0.50 m → 前进 1.20 m → 零速保持。
+
+只输出策略，不连接机器人：
+
+```bash
+python3 mission/scripts/run_letter_delivery_competition.py --target-letter B
+```
+
+视觉只使用 ZED RGB，不使用深度。ZED 默认运行在独立视觉域 1，最新压缩帧
+通过原子 JPEG 文件交给控制域 0 的搜索器，避免大图像 DDS 流量污染底盘速度
+控制。底盘主机需在部署阶段一次性运行
+`base/scripts/14_prepare_letter_vision.sh`；比赛运行期间不会安装依赖。
+
+实机 B 流程已验证：B 近排居中、下降 0.36 m 放置、按实测横移距离返回、
+逆时针 180°、重新识别门中线并完成 `0.50 m + 1.20 m` 回程。门框子流程
+失败但横移和旋转已完成时，可用 `--resume-door` 从 `DOOR_RETURN_FAILED`
+检查点续跑，不会重复前两段运动。

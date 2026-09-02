@@ -212,8 +212,8 @@ move_arm() {
     exit 30
   fi
 }
-move_arm left '$left'
 move_arm right '$right'
+move_arm left '$left'
 "@
 }
 

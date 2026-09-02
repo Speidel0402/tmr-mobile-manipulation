@@ -33,13 +33,27 @@ class InitialPoseConsistencyTests(unittest.TestCase):
         source = (ROOT / "scripts" / "initialize_dual_arm_pick_pose.py").read_text(encoding="utf-8")
         self.assertIn('"config" / "grasp_initial_state.yaml"', source)
         self.assertIn('"gripper_commanded": False', source)
-        self.assertIn("JOINT_HOLD_TOLERANCE_RAD = 0.018", source)
+        self.assertIn("JOINT_HOLD_TOLERANCE_RAD = 0.006", source)
+        self.assertIn('"reset_required"', source)
+        self.assertNotIn('"already_at_target"', source)
         self.assertIn("self.publish_hold_target(samples=12)", source)
         self.assertNotIn("GripperCommand", source)
+
+    def test_right_arm_parks_before_left_arm_enters_pick_corridor(self) -> None:
+        config = yaml.safe_load((ROOT / "config" / "grasp_initial_state.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(config["initialization_order"], ["right", "left"])
+        source = (ROOT / "scripts" / "start_tmr_system.ps1").read_text(encoding="utf-8")
+        self.assertLess(source.index("move_arm right '$right'"), source.index("move_arm left '$left'"))
 
     def test_system_startup_contains_the_same_left_target(self) -> None:
         startup = (ROOT / "config" / "system_startup.psd1").read_text(encoding="utf-8")
         for value in recorded_pick_joints():
+            self.assertIn(str(value), startup)
+
+    def test_system_startup_contains_the_same_right_target(self) -> None:
+        config = yaml.safe_load((ROOT / "config" / "grasp_initial_state.yaml").read_text(encoding="utf-8"))
+        startup = (ROOT / "config" / "system_startup.psd1").read_text(encoding="utf-8")
+        for value in config["right"]["positions"]:
             self.assertIn(str(value), startup)
 
 

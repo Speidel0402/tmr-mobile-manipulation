@@ -1,5 +1,14 @@
 # TMR：连续门框对齐与定距前进
 
+字母投放扩展（当前仅保存在本地开发树）：
+
+- `scripts/14_letter_guided_search.py`：白卡字母识别、near/far 分类、最多
+  2.40 m 向右搜索和自适应图像居中；
+- `scripts/15_return_from_letter.py`：按搜索实测距离等距向左、逆时针
+  180°，随后复用门中线/0.50 m/1.20 m 流程；
+- `scripts/14_prepare_letter_vision.sh` 只在部署时建立轻量 OpenCV 环境，
+  实时任务使用 `14_run_letter_guided_search.sh`，不在比赛期间安装软件。
+
 ## 新的连续“起点到抓取位”流程
 
 `scripts/07_start_to_pickup.py` 把当前确认的底盘路线做成一个常驻进程：
@@ -182,3 +191,15 @@ python3 ~/tmr_cycle/scripts/capture_pose.py ~/tmr_cycle/config/route.yaml inspec
 - 桌面视觉：`/tmr_cycle/perception_command` (`std_msgs/String`)
 
 实机测试必须低速进行，人员手持急停。当前底盘曾出现 `communication_constraints_violation`，在通信/控制器稳定前不要进行自主移动。
+
+## ZED 字母搜索通信隔离
+
+`14_run_letter_guided_search.sh` 默认把 ZED 放在独立的视觉域 1，由
+`zed_frame_export.py` 原子更新 `/tmp/tmr_zed_latest.jpg`；字母搜索器在底盘
+控制域中读取该文件，因此不会在控制 DDS 域订阅高带宽压缩图像。ZED 冷启动
+最多等待 65 秒，避免旧版 10 秒窗口造成误判离线。
+
+正常比赛仍通过 `cmd_vel_adapter` 独占发布。`--direct-controller` 仅用于适配器
+故障恢复；使用前必须停止适配器，确保 `swerve_drive_controller/cmd_vel` 只有
+一个发布者。底盘 bring-up 若自动启动 `teleop_twist_joy_node`，自主门框流程会
+拒绝运行，需先停止该直发节点。

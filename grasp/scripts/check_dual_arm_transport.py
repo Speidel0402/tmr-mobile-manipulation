@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--right-plan", required=True)
     parser.add_argument("--left-start", type=joints, required=True)
     parser.add_argument("--right-start", type=joints, required=True)
+    parser.add_argument("--order", choices=("right,left", "left,right"), default="right,left")
     parser.add_argument("--service", default="/left_ik/check_state_validity")
     args = parser.parse_args()
     left = json.load(open(args.left_plan, encoding="utf-8"))
@@ -60,30 +61,44 @@ def main():
                 })
 
         check("start", 0, args.left_start, args.right_start)
-        for index, waypoint in enumerate(left["waypoints"], 1):
-            check("left_raise", index, waypoint["joint_positions_rad"], args.right_start)
         left_target = left["target_joint_positions_rad"]
-        for index, waypoint in enumerate(right["waypoints"], 1):
-            check("right_raise", index, left_target, waypoint["joint_positions_rad"])
         right_target = right["target_joint_positions_rad"]
+        order = args.order.split(",")
+        stationary = {
+            "left": list(args.left_start),
+            "right": list(args.right_start),
+        }
+        plans = {"left": left, "right": right}
+        targets = {"left": left_target, "right": right_target}
+        for arm in order:
+            for index, waypoint in enumerate(plans[arm].get("waypoints", []), 1):
+                moving = waypoint["joint_positions_rad"]
+                left_joints = moving if arm == "left" else stationary["left"]
+                right_joints = moving if arm == "right" else stationary["right"]
+                check(f"{arm}_ik", index, left_joints, right_joints)
+            stationary[arm] = targets[arm]
+
         samples = 80
-        for index in range(1, samples + 1):
-            fraction = index / samples
-            left_joints = [
-                start + fraction * (target - start)
-                for start, target in zip(args.left_start, left_target)
-            ]
-            check("left_ptp", index, left_joints, args.right_start)
-        for index in range(1, samples + 1):
-            fraction = index / samples
-            right_joints = [
-                start + fraction * (target - start)
-                for start, target in zip(args.right_start, right_target)
-            ]
-            check("right_ptp", index, left_target, right_joints)
+        stationary = {
+            "left": list(args.left_start),
+            "right": list(args.right_start),
+        }
+        starts = {"left": args.left_start, "right": args.right_start}
+        for arm in order:
+            for index in range(1, samples + 1):
+                fraction = index / samples
+                moving = [
+                    start + fraction * (target - start)
+                    for start, target in zip(starts[arm], targets[arm])
+                ]
+                left_joints = moving if arm == "left" else stationary["left"]
+                right_joints = moving if arm == "right" else stationary["right"]
+                check(f"{arm}_ptp", index, left_joints, right_joints)
+            stationary[arm] = targets[arm]
 
         print(json.dumps({
             "valid": not invalid,
+            "order": order,
             "checked_states": 1 + len(left["waypoints"]) + len(right["waypoints"]) + 2 * samples,
             "invalid_states": invalid,
         }, separators=(",", ":")))

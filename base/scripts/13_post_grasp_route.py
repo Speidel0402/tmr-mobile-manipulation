@@ -57,14 +57,19 @@ def confirmed_stages(
     backward_m: float,
     right_first_m: float,
     right_second_m: float,
+    include_right: bool = True,
 ) -> list[Stage]:
-    return [
+    stages = [
         Stage("RETREAT_TO_PREDOOR", "translate", -retreat_m, 0.0),
         Stage("TURN_CCW180", "rotate", math.radians(turn_deg)),
         Stage("BACKWARD_AFTER_TURN", "translate", -backward_m, 0.0),
-        Stage("RIGHT_STAGE_1", "translate", 0.0, -right_first_m),
-        Stage("RIGHT_STAGE_2", "translate", 0.0, -right_second_m),
     ]
+    if include_right:
+        stages.extend([
+            Stage("RIGHT_STAGE_1", "translate", 0.0, -right_first_m),
+            Stage("RIGHT_STAGE_2", "translate", 0.0, -right_second_m),
+        ])
+    return stages
 
 
 class RouteController(Node):
@@ -277,11 +282,23 @@ def main() -> int:
     parser.add_argument("--backward-m", type=float, default=0.25)
     parser.add_argument("--right-first-m", type=float, default=0.80)
     parser.add_argument("--right-second-m", type=float, default=0.85)
+    parser.add_argument(
+        "--stop-before-right",
+        action="store_true",
+        help="run the verified retreat/turn/backward prefix and leave right motion to letter search",
+    )
     parser.add_argument("--linear-speed-mps", type=float, default=0.08)
     parser.add_argument("--angular-speed-rps", type=float, default=0.18)
     parser.add_argument("--state-file", type=Path, default=Path("~/tmr_cycle/state/post_grasp_route.json").expanduser())
     args = parser.parse_args()
-    stages = confirmed_stages(args.retreat_m, args.turn_deg, args.backward_m, args.right_first_m, args.right_second_m)
+    stages = confirmed_stages(
+        args.retreat_m,
+        args.turn_deg,
+        args.backward_m,
+        args.right_first_m,
+        args.right_second_m,
+        include_right=not args.stop_before_right,
+    )
     summary = {
         "collision_guard": "disabled_by_design",
         "stages": [{"name": item.name, "kind": item.kind, "values": [item.first, item.second]} for item in stages],

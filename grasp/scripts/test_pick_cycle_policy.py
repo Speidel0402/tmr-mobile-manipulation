@@ -109,6 +109,20 @@ class PickCyclePolicyTests(unittest.TestCase):
         self.assertEqual(verdict["classification"], "fully_closed_unconfirmed")
         self.assertFalse(verdict["accepted_as_grasp"])
 
+    def test_real_cup_contact_inside_controller_goal_tolerance_is_accepted(self):
+        result = {
+            "status": 4,
+            "position": 0.7929,
+            "stalled": False,
+            "reached_goal": True,
+            "feedback_positions": [],
+        }
+        verdict = classify_close_result(result)
+        self.assertEqual(
+            verdict["classification"], "object_contact_within_goal_tolerance"
+        )
+        self.assertTrue(verdict["accepted_as_grasp"])
+
     def test_fresh_state_mismatch_is_rejected(self):
         result = {
             "status": 6,

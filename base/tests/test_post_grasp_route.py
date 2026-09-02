@@ -36,6 +36,7 @@ class PostGraspRouteContracts(unittest.TestCase):
 
     def test_runner_reuses_proven_ros_environment_before_nounset(self) -> None:
         self.assertIn('CYCLONEDDS_URI="file://${HOME}/cyclonedds.xml"', RUNNER)
+        self.assertIn("rmw_cyclonedds_cpp", RUNNER)
         self.assertLess(RUNNER.index("source /opt/ros/humble/setup.bash"), RUNNER.index("set -u"))
         self.assertIn("flock -n /tmp/tmr_post_grasp_route.lock", RUNNER)
 

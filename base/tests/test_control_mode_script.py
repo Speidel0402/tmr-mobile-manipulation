@@ -27,6 +27,14 @@ class ControlModeContracts(unittest.TestCase):
         self.assertIn("cmd_vel:=/tmr_cycle/cmd_vel", SOURCE)
         self.assertNotIn("cmd_vel:=/swerve_drive_controller/cmd_vel", SOURCE)
 
+    def test_all_control_nodes_use_the_proven_cyclone_environment(self) -> None:
+        self.assertIn("export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp", SOURCE)
+        self.assertIn("RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION}", SOURCE)
+        self.assertIn("CYCLONEDDS_URI=${CYCLONEDDS_URI", SOURCE)
+        self.assertIn("^ROS_DOMAIN_ID=${ROS_DOMAIN_ID}$", SOURCE)
+        self.assertIn('if [[ "${#pids[@]}" == 1 ]]', SOURCE)
+        self.assertIn('for pid in "${pids[@]}"', SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,6 +97,23 @@ class LetterVisionContracts(unittest.TestCase):
         self.assertIsNotNone(policy.image_gain_per_m)
         self.assertGreater(command, 0.0)
 
+    def test_center_crossing_stops_then_accepts_a_credible_single_frame(self) -> None:
+        hold = search.CenterHold(0.055, single_frame_hold_s=0.30)
+        holding, centered, _, _ = hold.update(
+            search.TargetObservation(1.76, 0.483, "near", 0.36, 1), 10.0
+        )
+        self.assertTrue(holding)
+        self.assertFalse(centered)
+        holding, centered, error, _ = hold.status(10.31)
+        self.assertTrue(holding)
+        self.assertTrue(centered)
+        self.assertAlmostEqual(error, -0.017)
+
+    def test_center_hold_rejects_a_low_confidence_single_frame(self) -> None:
+        hold = search.CenterHold(0.055, single_frame_hold_s=0.30)
+        hold.update(search.TargetObservation(1.2, 0.51, "near", 0.20, 1), 4.0)
+        self.assertFalse(hold.status(4.31)[1])
+
 
 if __name__ == "__main__":
     unittest.main()

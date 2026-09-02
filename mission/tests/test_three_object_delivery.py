@@ -173,6 +173,60 @@ class ThreeObjectDeliveryContracts(unittest.TestCase):
 
         self.assertEqual(labels, ["control-mission", "dual-init", "control-teleop"])
 
+    def test_confirmed_cup_held_resume_does_not_reopen_or_repick_cup(self):
+        values = tasks()
+        labels = []
+
+        def report_for(label):
+            if label == "control-mission":
+                return {"status": "success", "mode": "mission", "teleop_velocity_enabled": False, "mission_lease": True}
+            if label == "control-teleop":
+                return {"status": "success", "mode": "teleop", "teleop_velocity_enabled": True, "mission_lease": False}
+            if label.endswith("-prepare"):
+                return {
+                    "status": "complete", "next_stage": 3,
+                    "zero_command_latched": True,
+                    "reports": [
+                        {"stage": "RETREAT_TO_PREDOOR", "actual_forward_m": -1.684},
+                        {"stage": "TURN_CCW180", "actual_ccw_deg": 179.34},
+                        {"stage": "BACKWARD_AFTER_TURN", "actual_forward_m": -0.2342},
+                    ],
+                }
+            if label.endswith("-search"):
+                name = label.split("-")[0]
+                letter = {item.name: item.letter for item in values}[name]
+                return {"status": "success", "target_centered": True, "target_letter": letter, "row": "near", "actual_right_m": 1.2, "zero_command_latched": True}
+            if label.endswith("-place"):
+                return {"status": "complete", "phase": "DONE", "released": True, "stable_hold_recovery_attempt": 1}
+            if label.endswith("-return"):
+                return {"status": "complete", "phase": "COMPLETE", "zero_command_latched": True, "reports": [{"stage": "LEFT_BY_MEASURED_OUTBOUND"}, {"stage": "TURN_CW_180"}], "door_report": {"status": "success", "final_state": "FINAL_STOP"}}
+            return {}
+
+        def fake_run(label, _argv, _timeout, _log):
+            labels.append(label)
+            return SimpleNamespace(returncode=0, output=json.dumps(report_for(label)))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(
+                checkpoint=root / "state.json", log_dir=root / "logs",
+                base_phase_timeout_s=180.0, search_timeout_s=120.0,
+                return_timeout_s=240.0, resume_at_pickup_confirmed=False,
+                resume_after_cup_held_confirmed=True,
+            )
+            with (
+                mock.patch.object(mission, "run_streamed_command", side_effect=fake_run),
+                mock.patch.object(mission, "pick_report_is_stable", return_value=(True, {})),
+            ):
+                mission.run_locked(args, config(), values)
+
+        self.assertNotIn("dual-init", labels)
+        self.assertNotIn("spine-init", labels)
+        self.assertNotIn("outbound", labels)
+        self.assertNotIn("cup-pick", labels)
+        self.assertIn("cup-prepare", labels)
+        self.assertIn("bowl-pick", labels)
+
 
 if __name__ == "__main__":
     unittest.main()

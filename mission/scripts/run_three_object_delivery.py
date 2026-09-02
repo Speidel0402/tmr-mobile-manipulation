@@ -321,11 +321,16 @@ def run(args: argparse.Namespace) -> int:
     if not args.execute:
         print(json.dumps(strategy(config, tasks, args.checkpoint), ensure_ascii=False, indent=2))
         return 0
-    if args.fresh_start_confirmed and args.resume_at_pickup_confirmed:
-        raise MissionError("choose either fresh start or pickup-table resume, not both")
-    if not args.fresh_start_confirmed and not args.resume_at_pickup_confirmed:
+    start_modes = (
+        bool(args.fresh_start_confirmed),
+        bool(args.resume_at_pickup_confirmed),
+        bool(getattr(args, "resume_after_cup_held_confirmed", False)),
+    )
+    if sum(start_modes) > 1:
+        raise MissionError("choose exactly one confirmed start/resume mode")
+    if not any(start_modes):
         raise MissionError(
-            "execution requires --fresh-start-confirmed or --resume-at-pickup-confirmed"
+            "execution requires a confirmed fresh, pickup-table, or cup-held start"
         )
     previous = load_checkpoint(args.checkpoint)
     if previous is not None:
@@ -377,7 +382,9 @@ def run_locked(
             raise MissionError("failed to disable teleop and acquire mission control")
 
         arm_host = getattr(args, "arm_host", DEFAULT_ARM_HOST)
-        if not getattr(args, "resume_at_pickup_confirmed", False):
+        resume_at_pickup = getattr(args, "resume_at_pickup_confirmed", False)
+        resume_after_cup_held = getattr(args, "resume_after_cup_held_confirmed", False)
+        if not resume_at_pickup and not resume_after_cup_held:
             phase = "INITIALIZING_DUAL_ARMS"
             save_checkpoint(args.checkpoint, run_id, phase, tasks, completed=completed)
             result = execute(
@@ -410,30 +417,37 @@ def run_locked(
                 emit("transport_exit_ignored_after_final_stop", returncode=result.returncode)
             settle()
         else:
-            phase = "AT_PICKUP_RESUMED"
+            phase = "CUP_HELD_RESUMED" if resume_after_cup_held else "AT_PICKUP_RESUMED"
             save_checkpoint(args.checkpoint, run_id, phase, tasks, completed=completed)
 
         for index, task in enumerate(tasks):
             stage_id = f"{run_id}_{task.name}"
-            phase = f"{task.name.upper()}_PICK_RUNNING"
-            save_checkpoint(
-                args.checkpoint,
-                run_id,
-                phase,
-                tasks,
-                completed=completed,
-                object=task.name,
-                letter=task.letter,
-            )
-            result = execute(
-                f"{task.name}-pick",
-                object_pick_argv(config, task, arm_host),
-                config.pick_timeout_s,
-            )
-            stable, pick_event = pick_report_is_stable(result.output, result.returncode)
-            if not stable:
-                raise MissionError(f"{task.name} pick did not reach stable held state")
-            settle()
+            if index == 0 and resume_after_cup_held:
+                pick_event = {
+                    "event": "operator_confirmed_object_held_resume",
+                    "object": task.name,
+                }
+                emit("cup_pick_skipped_object_already_held", run_id=run_id)
+            else:
+                phase = f"{task.name.upper()}_PICK_RUNNING"
+                save_checkpoint(
+                    args.checkpoint,
+                    run_id,
+                    phase,
+                    tasks,
+                    completed=completed,
+                    object=task.name,
+                    letter=task.letter,
+                )
+                result = execute(
+                    f"{task.name}-pick",
+                    object_pick_argv(config, task, arm_host),
+                    config.pick_timeout_s,
+                )
+                stable, pick_event = pick_report_is_stable(result.output, result.returncode)
+                if not stable:
+                    raise MissionError(f"{task.name} pick did not reach stable held state")
+                settle()
 
             phase = f"{task.name.upper()}_PREPARING_SEARCH"
             save_checkpoint(args.checkpoint, run_id, phase, tasks, completed=completed)
@@ -568,6 +582,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--fresh-start-confirmed", action="store_true")
     parser.add_argument("--resume-at-pickup-confirmed", action="store_true")
+    parser.add_argument("--resume-after-cup-held-confirmed", action="store_true")
     parser.add_argument("--cup-letter", default="B")
     parser.add_argument("--bowl-letter", default="A")
     parser.add_argument("--plate-letter", default="D")

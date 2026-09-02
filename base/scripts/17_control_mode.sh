@@ -21,8 +21,22 @@ publish_lease() {
 }
 
 ensure_cmd_adapter() {
-  if pgrep -f 'python3 .*scripts/cmd_vel_adapter.py([[:space:]]|$)' >/dev/null; then
-    return
+  local pid=''
+  local -a pids=()
+  mapfile -t pids < <(pgrep -f '^python3 .*scripts/cmd_vel_adapter.py([[:space:]]|$)' || true)
+  if [[ "${#pids[@]}" == 1 ]]; then
+    pid="${pids[0]}"
+    if tr '\0' '\n' <"/proc/${pid}/environ" | grep -q '^RMW_IMPLEMENTATION=rmw_cyclonedds_cpp$' && \
+       tr '\0' '\n' <"/proc/${pid}/environ" | grep -q "^ROS_DOMAIN_ID=${ROS_DOMAIN_ID}$"; then
+      return
+    fi
+  fi
+  if [[ "${#pids[@]}" -gt 0 ]]; then
+    screen -S tmr_cmd_adapter -X quit >/dev/null 2>&1 || true
+    for pid in "${pids[@]}"; do
+      kill -TERM "${pid}" 2>/dev/null || true
+    done
+    sleep 0.5
   fi
   screen -S tmr_cmd_adapter -X quit >/dev/null 2>&1 || true
   screen -dmS tmr_cmd_adapter /bin/bash -c \

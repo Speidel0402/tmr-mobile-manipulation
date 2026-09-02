@@ -387,6 +387,41 @@ def visual_tolerance(observation):
     return visual_tolerances(observation.get("spread_px", 0.0))["enter_px"]
 
 
+def recover_best_visual_pose(arm, best, stamp, camera_session_id, iterations, reason):
+    """Return the best measured pose when a finer Cartesian step is unreachable."""
+    if float(np.linalg.norm(np.asarray(arm.q) - np.asarray(best["q"]))) > 1e-4:
+        arm.move_ptp(best["q"])
+    try:
+        confirmation = detect_cup_right(
+            previous_stamp=stamp,
+            expected_session_id=camera_session_id,
+            expected_point=best["point"],
+            maximum_tracking_error_px=35.0,
+        )
+        best["point"] = confirmation["point"]
+        best["error"] = TARGET - confirmation["point"]
+        best["observation"] = confirmation
+    except RuntimeError as exc:
+        # The cached observation was captured at this exact joint pose.  A
+        # transient missed frame must not discard an already usable alignment.
+        emit("best_pose_confirmation_unavailable", reason=reason, error=str(exc))
+    if float(np.max(np.abs(best["error"]))) <= MAX_RECOVERABLE_VISUAL_ERROR_PX:
+        emit(
+            "aligned_best_recovered",
+            point_px=best["point"].tolist(),
+            error_px=best["error"].tolist(),
+            tolerance_px=MAX_RECOVERABLE_VISUAL_ERROR_PX,
+            reason=reason,
+        )
+        return {
+            "point": best["point"],
+            "error": best["error"],
+            "iterations": iterations,
+            "mode": "best_pose_at_kinematic_boundary",
+        }
+    return None
+
+
 def calibrate(arm, camera_session_id, preflight_stamp):
     initial_pose = arm.fk(list(arm.q))
     base_origin = np.asarray([initial_pose.position.x, initial_pose.position.y], dtype=float)
@@ -493,9 +528,28 @@ def calibrate(arm, camera_session_id, preflight_stamp):
                 minimum_executable_m=MIN_EXECUTABLE_FINE_STEP_M,
             )
         if float(np.linalg.norm(current_base + step - base_origin)) > MAX_VISUAL_SEARCH_M:
+            recovered = recover_best_visual_pose(
+                arm, best, stamp, camera_session_id, iteration - 1, "visual_search_limit"
+            )
+            if recovered is not None:
+                return recovered
+            restore_recorded_top_joint_pose(arm)
             raise RuntimeError(f"visual search exceeded {MAX_VISUAL_SEARCH_M:.2f}m")
         old_norm = float(np.linalg.norm(error))
-        actual, new_base, end_pose = arm.move_xy(step)
+        try:
+            actual, new_base, end_pose = arm.move_xy(step)
+        except RuntimeError as exc:
+            if "horizontal path invalid" not in str(exc):
+                raise
+            recovered = recover_best_visual_pose(
+                arm, best, stamp, camera_session_id, iteration - 1, "cartesian_kinematic_boundary"
+            )
+            if recovered is not None:
+                return recovered
+            restore_recorded_top_joint_pose(arm)
+            raise RuntimeError(
+                "visual correction reached a kinematic boundary before a usable alignment"
+            ) from exc
         predicted_point = current_point + jacobian @ actual
         observation = detect_cup_right(
             previous_stamp=stamp,
@@ -540,24 +594,12 @@ def calibrate(arm, camera_session_id, preflight_stamp):
             stagnation = 0
             emit("jacobian_reset", iteration=iteration, reason="three_non_improving_updates")
 
-    if float(np.linalg.norm(np.asarray(arm.q) - np.asarray(best["q"]))) > 1e-4:
-        arm.move_ptp(best["q"])
-        best_confirm = detect_cup_right(
-            previous_stamp=stamp,
-            expected_session_id=camera_session_id,
-            expected_point=best["point"],
-            maximum_tracking_error_px=35.0,
-        )
-        best["point"] = best_confirm["point"]
-        best["error"] = TARGET - best_confirm["point"]
-        best["observation"] = best_confirm
-    final_limit = min(
-        MAX_RECOVERABLE_VISUAL_ERROR_PX,
-        visual_tolerance(best["observation"]) + 2.0,
+    recovered = recover_best_visual_pose(
+        arm, best, stamp, camera_session_id, 16, "iteration_limit"
     )
-    if float(np.max(np.abs(best["error"]))) <= final_limit:
-        emit("aligned_best_recovered", point_px=best["point"].tolist(), error_px=best["error"].tolist(), tolerance_px=final_limit)
-        return {"point": best["point"], "error": best["error"], "iterations": 16, "mode": "best_pose_recovered"}
+    if recovered is not None:
+        return recovered
+    restore_recorded_top_joint_pose(arm)
     raise RuntimeError("visual alignment remained outside recoverable range " + repr(best["error"].tolist()))
 
 

@@ -118,6 +118,71 @@ class TargetTracker:
         return stable, mean, spread
 
 
+class CenterHold:
+    """Stop on a credible centre crossing before motion carries the card away."""
+
+    def __init__(
+        self,
+        center_tolerance_norm: float,
+        acquire_tolerance_norm: float = 0.080,
+        grace_s: float = 0.70,
+        single_frame_hold_s: float = 0.30,
+        single_frame_confidence: float = 0.30,
+    ) -> None:
+        self.center_tolerance_norm = float(center_tolerance_norm)
+        self.acquire_tolerance_norm = max(
+            float(acquire_tolerance_norm), self.center_tolerance_norm
+        )
+        self.grace_s = float(grace_s)
+        self.single_frame_hold_s = float(single_frame_hold_s)
+        self.single_frame_confidence = float(single_frame_confidence)
+        self.samples: deque[TargetObservation] = deque(maxlen=5)
+        self.started_at: float | None = None
+        self.last_seen_at: float | None = None
+
+    def reset(self) -> None:
+        self.samples.clear()
+        self.started_at = None
+        self.last_seen_at = None
+
+    def update(
+        self, observation: TargetObservation | None, now: float
+    ) -> tuple[bool, bool, float | None, float | None]:
+        if observation is not None:
+            error = observation.center_x_norm - 0.5
+            if abs(error) <= self.acquire_tolerance_norm:
+                if self.started_at is None:
+                    self.started_at = float(now)
+                    self.samples.clear()
+                self.samples.append(observation)
+                self.last_seen_at = float(now)
+            elif abs(error) > 1.6 * self.acquire_tolerance_norm:
+                self.reset()
+        return self.status(now)
+
+    def status(self, now: float) -> tuple[bool, bool, float | None, float | None]:
+        if self.started_at is None or self.last_seen_at is None or not self.samples:
+            return False, False, None, None
+        if float(now) - self.last_seen_at > self.grace_s:
+            self.reset()
+            return False, False, None, None
+        errors = [item.center_x_norm - 0.5 for item in self.samples]
+        mean = sum(errors) / len(errors)
+        spread = max(errors) - min(errors)
+        repeated = (
+            len(errors) >= 2
+            and abs(mean) <= self.center_tolerance_norm
+            and spread <= 0.040
+        )
+        latest = self.samples[-1]
+        credible_crossing = (
+            float(now) - self.started_at >= self.single_frame_hold_s
+            and abs(latest.center_x_norm - 0.5) <= self.center_tolerance_norm
+            and latest.confidence >= self.single_frame_confidence
+        )
+        return True, bool(repeated or credible_crossing), mean, spread
+
+
 class AdaptiveCenterPolicy:
     """Learn d(image-x)/d(robot-right) and close the image-centering loop."""
 
@@ -271,6 +336,11 @@ def run_ros(args: argparse.Namespace) -> dict:
         center_tolerance_norm=args.center_tolerance_norm,
         stable_frames=args.stable_frames,
     )
+    center_hold = CenterHold(
+        args.center_tolerance_norm,
+        acquire_tolerance_norm=args.center_acquire_norm,
+        single_frame_hold_s=args.center_hold_s,
+    )
     policy = AdaptiveCenterPolicy(args.search_speed_mps, args.refine_speed_mps)
     recognizer = LetterCardRecognizer(
         alphabet=args.alphabet,
@@ -288,6 +358,10 @@ def run_ros(args: argparse.Namespace) -> dict:
     max_right_seen = 0.0
     motion_anchor = None
     motion_anchor_at = time.monotonic()
+    holding_center = False
+    hold_centered = False
+    hold_error = None
+    hold_spread = None
     try:
         node.ready()
         start = node.fresh_pose()
@@ -314,6 +388,9 @@ def run_ros(args: argparse.Namespace) -> dict:
                 decoded_frames += 1
                 detections = recognizer.detect(frame)
                 latest_observation = tracker.observe(detections, right_m)
+                holding_center, hold_centered, hold_error, hold_spread = center_hold.update(
+                    latest_observation, time.monotonic()
+                )
                 if latest_observation is not None:
                     target_frames += 1
                     last_target_at = time.monotonic()
@@ -326,7 +403,12 @@ def run_ros(args: argparse.Namespace) -> dict:
                         "members": latest_observation.members,
                         "right_m": right_m,
                     }), flush=True)
+            holding_center, hold_centered, hold_error, hold_spread = center_hold.status(
+                time.monotonic()
+            )
             centered, mean_error, spread = tracker.centered()
+            if not centered and hold_centered:
+                centered, mean_error, spread = True, hold_error, hold_spread
             if centered:
                 node.stop(30)
                 end_x, end_y, end_yaw = node.fresh_pose()
@@ -348,8 +430,12 @@ def run_ros(args: argparse.Namespace) -> dict:
                     "end_odom": [end_x, end_y, end_yaw],
                     "yaw_error_deg": math.degrees(wrap(end_yaw - start_yaw)),
                 }
-            right_speed = policy.command(latest_observation)
-            if last_target_at is not None and time.monotonic() - last_target_at > 1.4:
+            right_speed = 0.0 if holding_center else policy.command(latest_observation)
+            if (
+                not holding_center
+                and last_target_at is not None
+                and time.monotonic() - last_target_at > 1.4
+            ):
                 right_speed = 0.35 * args.search_speed_mps * policy.last_direction
             if right_speed > 0.0 and right_m >= args.max_right_m - 0.025:
                 node.stop(30)
@@ -423,6 +509,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-speed-mps", type=float, default=0.055)
     parser.add_argument("--refine-speed-mps", type=float, default=0.040)
     parser.add_argument("--center-tolerance-norm", type=float, default=0.055)
+    parser.add_argument("--center-acquire-norm", type=float, default=0.080)
+    parser.add_argument("--center-hold-s", type=float, default=0.30)
     parser.add_argument("--stable-frames", type=int, default=3)
     parser.add_argument("--minimum-confidence", type=float, default=0.22)
     parser.add_argument("--row-split-y-norm", type=float, default=0.52)

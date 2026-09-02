@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""RGB-only detector for the calibrated green cup rim."""
+"""RGB-only detector for the calibrated cup rim.
+
+Colour is deliberately only a soft cue: the wrist D405's white balance can
+move the same pale-green cup across a large part of HSV space.
+"""
 
 import cv2
 import numpy as np
@@ -78,30 +82,50 @@ def detect_green_cup_right(bgr):
         saturation = float(np.median(hsv[:, :, 1][inner]))
         value = float(np.median(hsv[:, :, 2][inner]))
         texture = float(np.std(gray[inner]))
-        if not (45.0 <= hue <= 92.0 and saturation >= 52.0 and value >= 45.0):
+        radial = np.hypot(xx - center_x, yy - center_y)
+        rim = (radial >= 0.82 * radius) & (radial <= 1.18 * radius)
+        rim_support = float(np.mean(edges[rim] > 0))
+
+        # 76 mm cup calibration at the fixed pickup height gives roughly
+        # r=36 px.  This size and a supported circular rim are much more stable
+        # than hue.  They also reject the 120 mm bowl and 185 mm plate.
+        if not (30.0 <= radius <= 43.5 and rim_support >= 0.052 and value >= 42.0):
             continue
-        # Beans are dark and highly textured; the plate is excluded by radius.
-        if value < 52.0 and texture > 24.0:
+        # Reject dark, highly textured food while tolerating a spoon/reflection.
+        if texture > 29.0 or (value < 52.0 and texture > 22.0):
             continue
+        pale_green_bonus = 5.0 if 8.0 <= saturation <= 150.0 else 0.0
         score = (
-            saturation
-            + 0.18 * value
-            - 1.2 * abs(float(radius) - 37.0)
+            300.0 * rim_support
+            + pale_green_bonus
+            + 0.04 * value
+            - 2.0 * abs(float(radius) - 37.0)
             - 0.12 * max(0.0, texture - 18.0)
         )
         candidates.append(
-            (score, float(center_x), float(center_y), float(radius), hue, saturation, value, texture)
+            (
+                score,
+                float(center_x),
+                float(center_y),
+                float(radius),
+                hue,
+                saturation,
+                value,
+                texture,
+                rim_support,
+            )
         )
     if not candidates:
         raise RuntimeError("green cup candidate absent")
 
-    _, center_x, center_y, radius, hue, saturation, value, texture = max(candidates)
+    _, center_x, center_y, radius, hue, saturation, value, texture, rim_support = max(candidates)
     point, ellipse = _refine_right_edge(edges, center_x, center_y, radius)
     return point, {
         "center_px": [center_x, center_y],
         "radius_px": radius,
         "hsv_median": [hue, saturation, value],
         "inner_texture": texture,
+        "rim_support": rim_support,
         "ellipse": ellipse,
         "method": "ellipse_refined" if ellipse is not None else "hough_circle",
     }

@@ -41,6 +41,12 @@ class StartNavigationScriptTests(unittest.TestCase):
         self.assertIn("local_base_process_present", SCRIPT)
         self.assertIn("a local base/control process exists", SCRIPT)
         self.assertIn("controller_manager answered RPC; not launching a duplicate", SCRIPT)
+        self.assertIn("existing_managed_stack_healthy", SCRIPT)
+        self.assertIn("managed base/navigation stack is already healthy", SCRIPT)
+
+    def test_startup_owns_exactly_one_command_adapter(self):
+        self.assertIn("A prior standalone control-mode helper", SCRIPT)
+        self.assertIn("pgrep -f '^python3 .*scripts/cmd_vel_adapter.py", SCRIPT)
 
     def test_spawner_retry_cannot_race_and_uses_same_parameters(self):
         body = function_body("ensure_swerve_active")
@@ -50,17 +56,33 @@ class StartNavigationScriptTests(unittest.TestCase):
         self.assertIn('controller_params="${share_dir}/config/controllers.yaml"', body)
         self.assertIn('--ros-args --params-file "${controller_params}"', body)
 
+    def test_transient_fci_protocol_error_restarts_whole_base_launch(self):
+        body = function_body("start_base_with_fci_retry")
+        self.assertIn("for attempt in 1 2 3", body)
+        self.assertIn("base_log_has_retryable_fci_error", body)
+        self.assertIn("stop_process_group", body)
+        self.assertIn("restarting the complete base launch", body)
+        self.assertIn("libfranka: incorrect object size", SCRIPT)
+        active_wait = function_body("wait_for_controller_active")
+        self.assertIn("base_log_has_retryable_fci_error && return 1", active_wait)
+
     def test_upper_stack_waits_for_active_controller_odom_and_both_lidars(self):
-        manager = SCRIPT.index('wait_for_controller_manager "${base_pid}"')
-        active = SCRIPT.index("\n  ensure_swerve_active\n", manager)
-        odom = SCRIPT.index("wait_for_topic_once /swerve_drive_controller/odom", active)
-        lidars = SCRIPT.index("start_process lidars", odom)
+        base = function_body("start_base_with_fci_retry")
+        manager = base.index('wait_for_controller_manager "${base_pid}"')
+        active = base.index("ensure_swerve_active", manager)
+        odom = base.index("wait_for_topic_once /swerve_drive_controller/odom", active)
+        self.assertEqual([manager, active, odom], sorted([manager, active, odom]))
+        launch = SCRIPT.index("start_base_with_fci_retry", SCRIPT.index("main()"))
+        lidars = SCRIPT.index("start_process lidars", launch)
         front = SCRIPT.index("wait_for_topic_once /lidar_front/scan", lidars)
         rear = SCRIPT.index("wait_for_topic_once /lidar_rear/scan", front)
         slam = SCRIPT.index("start_process slam", rear)
-        self.assertEqual([manager, active, odom, lidars, front, rear, slam], sorted(
-            [manager, active, odom, lidars, front, rear, slam]
+        self.assertEqual([launch, lidars, front, rear, slam], sorted(
+            [launch, lidars, front, rear, slam]
         ))
+        topic_wait = function_body("wait_for_topic_once")
+        self.assertIn("while (( SECONDS < deadline ))", topic_wait)
+        self.assertIn("--once --no-daemon", topic_wait)
 
     def test_cleanup_is_bounded_and_escalates(self):
         body = function_body("cleanup")

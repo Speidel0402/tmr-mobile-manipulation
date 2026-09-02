@@ -16,6 +16,11 @@ from detect_plate import detect_plate
 PLATE_DESCENT_M = 0.375
 MIN_PLATE_DESCENT_M = 0.340
 MAX_PLATE_DESCENT_M = 0.380
+# The 185 mm plate changes apparent radius by several pixels during the same
+# horizontal correction that leaves cup/bowl scale nearly constant.  Override
+# only the plate wrapper; cup and bowl retain their stricter identity limits.
+PLATE_MAX_TRACKING_RADIUS_DELTA_PX = 8.0
+PLATE_MAX_STABLE_RADIUS_SPREAD_PX = 5.0
 
 
 def plate_right_once(image):
@@ -45,6 +50,8 @@ def main():
         )
 
     pick.cup_right_once = plate_right_once
+    pick.MAX_TRACKING_RADIUS_DELTA_PX = PLATE_MAX_TRACKING_RADIUS_DELTA_PX
+    pick.MAX_STABLE_RADIUS_SPREAD_PX = PLATE_MAX_STABLE_RADIUS_SPREAD_PX
     pick.DESCENT_M = float(args.descent_m)
     pick.GRASP_Z = pick.REFERENCE_Z - pick.DESCENT_M
     sys.argv = [sys.argv[0]] + (

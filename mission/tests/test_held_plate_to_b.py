@@ -70,8 +70,8 @@ class HeldPlateToBContracts(unittest.TestCase):
     def test_plate_config_uses_375mm_for_near_and_far(self):
         plan = mission.load_plan(wrapper.PLATE_CONFIG, None, None)
         self.assertEqual(plan.target_letter, "B")
-        self.assertEqual(mission.placement_values(plan, "near"), (0.0, 0.375))
-        self.assertEqual(mission.placement_values(plan, "far"), (0.16, 0.375))
+        self.assertEqual(mission.placement_values(plan, "near"), (0.1, 0.375))
+        self.assertEqual(mission.placement_values(plan, "far"), (0.26, 0.375))
 
     def test_stop_after_place_never_dispatches_return(self):
         plan = mission.load_plan(wrapper.PLATE_CONFIG, None, None)
@@ -88,7 +88,9 @@ class HeldPlateToBContracts(unittest.TestCase):
                 "target_centered": True,
                 "target_letter": "B",
                 "row": "near",
-                "actual_right_m": 1.1,
+                "actual_right_m": 1.2,
+                "center_error_norm": 0.02,
+                "evidence_saved": True,
                 "zero_command_latched": True,
             },
             "letter-place": {
@@ -136,7 +138,9 @@ class HeldPlateToBContracts(unittest.TestCase):
                 "target_centered": True,
                 "target_letter": "B",
                 "row": "near",
-                "actual_right_m": 0.8,
+                "actual_right_m": 1.2,
+                "center_error_norm": 0.02,
+                "evidence_saved": True,
                 "zero_command_latched": True,
             },
             "letter-place": {

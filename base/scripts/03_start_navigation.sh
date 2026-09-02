@@ -70,6 +70,20 @@ local_base_process_present() {
   pgrep -f 'tmrv0_2\.launch\.py|/controller_manager/ros2_control_node|/ros2_control_node' >/dev/null 2>&1
 }
 
+existing_managed_stack_healthy() {
+  local pid domain adapters
+  [[ -s "${ready_file}" ]] || return 1
+  pid="$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "${ready_file}" | head -n 1)"
+  domain="$(sed -n 's/^domain=\([0-9][0-9]*\)$/\1/p' "${ready_file}" | head -n 1)"
+  [[ -n "${pid}" && "${domain}" == "${ROS_DOMAIN_ID}" ]] || return 1
+  kill -0 "${pid}" 2>/dev/null || return 1
+  adapters="$(pgrep -fc '^python3 .*scripts/cmd_vel_adapter.py([[:space:]]|$)' || true)"
+  [[ "${adapters}" == "1" ]] || return 1
+  wait_for_topic_once /swerve_drive_controller/odom 4 || return 1
+  wait_for_topic_once /lidar_front/scan 4 || return 1
+  wait_for_topic_once /lidar_rear/scan 4 || return 1
+}
+
 # Prefer a completed RPC.  The Humble ros2control CLI can nevertheless spend
 # longer than its outer timeout in graph discovery on this host; the launch
 # log is a valid same-run fallback because log_dir is unique for every start.
@@ -136,6 +150,10 @@ wait_for_controller_active() {
   while (( SECONDS < deadline )); do
     controller_active && return 0
     [[ -z "${base_pid}" ]] || process_alive "${base_pid}" || return 1
+    # The launch parent can remain alive after its FCI child has already
+    # reported a protocol failure.  Exit this wait immediately so the bounded
+    # whole-stack retry can recover instead of wasting the spawner grace time.
+    base_log_has_retryable_fci_error && return 1
     sleep 1
   done
   return 1
@@ -152,6 +170,16 @@ ensure_swerve_active() {
   if wait_for_controller_active "${builtin_spawner_grace_s}"; then
     echo "[ready] launch spawner activated swerve_drive_controller"
     return 0
+  fi
+
+  if [[ -n "${base_pid}" ]] && ! process_alive "${base_pid}"; then
+    echo "[error] base launch exited before its controller became active" >&2
+    return 1
+  fi
+  if grep -Eq 'libfranka: incorrect object size|communication_constraints_violation' \
+      "${log_dir}/base.log" 2>/dev/null; then
+    echo "[error] transient FCI protocol failure interrupted this base launch" >&2
+    return 1
   fi
 
   local share_dir controller_params
@@ -178,10 +206,73 @@ ensure_swerve_active() {
   }
 }
 
+stop_process_group() {
+  local pid="$1"
+  process_alive "${pid}" || return 0
+  kill -INT -- "-${pid}" 2>/dev/null || true
+  local deadline=$((SECONDS + 7))
+  while (( SECONDS < deadline )); do
+    process_alive "${pid}" || return 0
+    sleep 0.1
+  done
+  kill -TERM -- "-${pid}" 2>/dev/null || true
+  deadline=$((SECONDS + 3))
+  while (( SECONDS < deadline )); do
+    process_alive "${pid}" || return 0
+    sleep 0.1
+  done
+  kill -KILL -- "-${pid}" 2>/dev/null || true
+}
+
+base_log_has_retryable_fci_error() {
+  grep -Eq \
+    'libfranka: incorrect object size|communication_constraints_violation|Franka: NetworkException' \
+    "${log_dir}/base.log" 2>/dev/null
+}
+
+start_base_with_fci_retry() {
+  local attempt pid
+  for attempt in 1 2 3; do
+    echo "[base] launch attempt ${attempt}/3"
+    start_process base ros2 launch franka_bringup tmrv0_2.launch.py controller_name:=swerve_drive_controller
+    base_pid="${last_pid}"
+    if wait_for_controller_manager "${base_pid}" \
+        && ensure_swerve_active \
+        && wait_for_topic_once /swerve_drive_controller/odom 8; then
+      return 0
+    fi
+    if (( attempt == 3 )) || ! base_log_has_retryable_fci_error; then
+      echo "[error] base startup failed without a retryable FCI signature" >&2
+      return 1
+    fi
+    echo "[retry] transient FCI protocol failure; restarting the complete base launch"
+    stop_process_group "${base_pid}"
+    wait "${base_pid}" 2>/dev/null || true
+    # Do not leave the reaped PID in the supervisor list.  `wait -n` treats a
+    # PID from a failed retry as an already-finished child and immediately
+    # tears down the healthy replacement stack.
+    local -a live_pids=()
+    for pid in "${pids[@]}"; do
+      process_alive "${pid}" && live_pids+=("${pid}")
+    done
+    pids=("${live_pids[@]}")
+    sleep 1
+  done
+  return 1
+}
+
 wait_for_topic_once() {
   local topic="$1"
   local wait_s="$2"
-  timeout "${wait_s}" ros2 topic echo --once "${topic}" >/dev/null 2>&1
+  local deadline=$((SECONDS + wait_s))
+  # Immediately after a controller/driver starts, ros2 topic echo can exit
+  # before DDS discovery knows the topic type.  Retry short reads inside the
+  # overall bound instead of treating that first discovery miss as failure.
+  while (( SECONDS < deadline )); do
+    timeout 2 ros2 topic echo --once --no-daemon "${topic}" >/dev/null 2>&1 && return 0
+    sleep 0.2
+  done
+  return 1
 }
 
 signal_alive_children() {
@@ -234,6 +325,10 @@ main() {
   configure_environment
   exec 9>/tmp/tmr_navigation_stack.lock
   if ! flock -n 9; then
+    if existing_managed_stack_healthy; then
+      echo "[reuse] managed base/navigation stack is already healthy"
+      return 0
+    fi
     echo "[error] the managed base/navigation stack is already running" >&2
     return 72
   fi
@@ -256,21 +351,19 @@ main() {
 
   if controller_manager_rpc; then
     echo "[reuse] controller_manager answered RPC; not launching a duplicate"
+    wait_for_controller_manager ""
+    ensure_swerve_active
+    if ! wait_for_topic_once /swerve_drive_controller/odom 8; then
+      echo "[error] controller is active but no fresh odometry arrived" >&2
+      return 1
+    fi
   else
     if local_base_process_present; then
       echo "[error] a local base/control process exists but controller_manager RPC is unresponsive" >&2
       echo "[error] stop the stale process explicitly before retrying" >&2
       return 1
     fi
-    start_process base ros2 launch franka_bringup tmrv0_2.launch.py controller_name:=swerve_drive_controller
-    base_pid="${last_pid}"
-  fi
-
-  wait_for_controller_manager "${base_pid}"
-  ensure_swerve_active
-  if ! wait_for_topic_once /swerve_drive_controller/odom 8; then
-    echo "[error] controller is active but no fresh odometry arrived" >&2
-    return 1
+    start_base_with_fci_retry
   fi
 
   start_process lidars ros2 launch franka_mobile_sensors franka_mobile_sensors.launch.py start_cameras:=false start_lidars:=true start_rviz:=false
@@ -282,6 +375,12 @@ main() {
   assert_process_alive adapter "${last_pid}" 2
   start_process slam ros2 launch tmr_local_navigation dual_lidar_slam.launch.py
   assert_process_alive slam "${last_pid}" 3
+  # Own exactly one command adapter.  A prior standalone control-mode helper
+  # can otherwise race this managed copy and create launch-time jitter.
+  while read -r adapter_pid; do
+    [[ -n "${adapter_pid}" ]] && kill -TERM "${adapter_pid}" 2>/dev/null || true
+  done < <(pgrep -f '^python3 .*scripts/cmd_vel_adapter.py([[:space:]]|$)' || true)
+  sleep 0.3
   start_process cmd_adapter python3 "${root_dir}/scripts/cmd_vel_adapter.py"
   assert_process_alive cmd_adapter "${last_pid}" 2
 

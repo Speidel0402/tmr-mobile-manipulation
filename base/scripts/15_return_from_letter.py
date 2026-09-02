@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Return from a letter placement to the pickup-table side.
 
-Order is fixed: translate robot-left by the measured outbound right distance,
+Order is fixed: translate robot-left by the measured outbound right distance
+plus the configured 0.20 m post-placement margin,
 rotate clockwise 180 degrees, then reuse the proven live doorway sequence with
 its initial forward/turn stages explicitly skipped:
 door centreline -> 0.50 m before door -> forward 1.20 m -> zero-speed hold.
@@ -165,10 +166,13 @@ def run(args: argparse.Namespace) -> dict:
         previous = json.loads(args.state_file.read_text(encoding="utf-8"))
         if not args.fresh_start and not args.resume_door:
             raise RuntimeError("return state exists; use --resume-door or --fresh-start explicitly")
+    total_left_m = args.left_m + args.extra_left_m
     state = {
         "status": "running",
         "phase": "CREATED",
         "requested_left_m": args.left_m,
+        "extra_left_m": args.extra_left_m,
+        "total_left_m": total_left_m,
         "turn_cw_deg": args.turn_cw_deg,
         "door_before_m": 0.50,
         "door_forward_m": 1.20,
@@ -199,9 +203,9 @@ def run(args: argparse.Namespace) -> dict:
             node.wait_ready()
             state["phase"] = "LEFT_RETURN_RUNNING"
             atomic_write(args.state_file, state)
-            if args.left_m > 0.018:
-                timeout = max(18.0, args.left_m / args.linear_speed_mps + 15.0)
-                left_report = node.translate(0.0, args.left_m, timeout)
+            if total_left_m > 0.018:
+                timeout = max(18.0, total_left_m / args.linear_speed_mps + 15.0)
+                left_report = node.translate(0.0, total_left_m, timeout)
             else:
                 left_report = {"skipped": True, "reason": "target was already centered"}
             state["reports"].append({"stage": "LEFT_BY_MEASURED_OUTBOUND", **left_report})
@@ -254,6 +258,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fresh-start", action="store_true")
     parser.add_argument("--resume-door", action="store_true")
     parser.add_argument("--left-m", type=float, required=True)
+    parser.add_argument("--extra-left-m", type=float, default=0.20)
     parser.add_argument("--turn-cw-deg", type=float, default=180.0)
     parser.add_argument("--linear-speed-mps", type=float, default=0.065)
     parser.add_argument("--angular-speed-rps", type=float, default=0.18)
@@ -268,6 +273,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not 0.0 <= args.left_m <= 2.40:
         parser.error("left-m must be the measured search distance in [0.00, 2.40]")
+    if not 0.0 <= args.extra_left_m <= 0.30:
+        parser.error("extra-left-m must be in [0.00, 0.30]")
     if not 175.0 <= args.turn_cw_deg <= 185.0:
         parser.error("turn must remain within the bounded 180-degree return range")
     if args.fresh_start and args.resume_door:
@@ -282,7 +289,8 @@ def main() -> int:
             "status": "dry_run",
             "motion_enabled": False,
             "sequence": [
-                f"left {args.left_m:.3f} m (measured outbound distance)",
+                f"left {args.left_m + args.extra_left_m:.3f} m "
+                f"(measured outbound + {args.extra_left_m:.3f} m placement margin)",
                 f"CW {args.turn_cw_deg:.1f} deg",
                 "live door midpoint alignment",
                 "stop 0.50 m before door",

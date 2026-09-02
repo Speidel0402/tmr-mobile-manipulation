@@ -353,11 +353,24 @@ class GripperInitializer(Node):
                 continue
             measured = float(wrapped.result.position)
             reached = bool(wrapped.result.reached_goal)
+            stalled = bool(wrapped.result.stalled)
             position_error = measured - self.target
-            if (
-                int(wrapped.status) == GoalStatus.STATUS_SUCCEEDED
-                and reached
-                and abs(position_error) <= self.tolerance
+            near_target = abs(position_error) <= self.tolerance
+            # A fully-closing Robotiq command commonly reports ABORTED/stalled
+            # at its mechanical stop although the measured position is already
+            # within tolerance.  This is a valid transport reset for the idle
+            # right gripper, but never relax the open-state check.
+            closed_at_mechanical_stop = (
+                self.target >= 0.75
+                and stalled
+                and int(wrapped.status) in (
+                    GoalStatus.STATUS_SUCCEEDED,
+                    GoalStatus.STATUS_ABORTED,
+                )
+            )
+            if near_target and (
+                (int(wrapped.status) == GoalStatus.STATUS_SUCCEEDED and reached)
+                or closed_at_mechanical_stop
             ):
                 return {
                     "arm": self.arm_name,
@@ -365,7 +378,13 @@ class GripperInitializer(Node):
                     "target_position": self.target,
                     "measured_position": measured,
                     "position_error": position_error,
-                    "reached_goal": True,
+                    "reached_goal": reached,
+                    "stalled": stalled,
+                    "accepted_as": (
+                        "mechanical_stop_within_tolerance"
+                        if closed_at_mechanical_stop and not reached
+                        else "controller_goal_reached"
+                    ),
                     "stable_reset": True,
                 }
             last_error = (

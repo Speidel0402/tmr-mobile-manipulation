@@ -58,14 +58,21 @@ class ThreeObjectDeliveryContracts(unittest.TestCase):
     def test_default_assignment_and_object_specific_depths(self):
         values = tasks()
         self.assertEqual(mission.assignment(values), {"cup": "B", "bowl": "A", "plate": "D"})
-        self.assertEqual(values[0].plan.alphabet, "ABD")
+        self.assertEqual(values[0].plan.alphabet, "ABCDE")
         self.assertEqual([item.pick_descent_m for item in values], [0.340, 0.360, 0.375])
         self.assertEqual([item.plan.near_down_m for item in values], [0.340, 0.360, 0.375])
+
+    def test_mission_control_first_ensures_idempotent_base_runtime(self):
+        command = " ".join(mission.control_mode_argv(config(), "mission"))
+        self.assertIn("19_ensure_navigation_stack.sh", command)
+        self.assertLess(command.index("19_ensure_navigation_stack.sh"), command.index("17_control_mode.sh"))
+        teleop = " ".join(mission.control_mode_argv(config(), "teleop"))
+        self.assertNotIn("19_ensure_navigation_stack.sh", teleop)
 
     def test_letters_are_real_parameters_and_must_be_distinct(self):
         values = tasks("C", "E", "F")
         self.assertEqual(mission.assignment(values), {"cup": "C", "bowl": "E", "plate": "F"})
-        self.assertEqual(values[0].plan.alphabet, "CEF")
+        self.assertEqual(values[0].plan.alphabet, "ABCDEF")
         with self.assertRaisesRegex(mission.MissionError, "distinct"):
             tasks("A", "A", "D")
 
@@ -76,6 +83,15 @@ class ThreeObjectDeliveryContracts(unittest.TestCase):
         self.assertIn("run_streamed_food_bowl_pick_cycle.py", commands[1])
         self.assertIn("run_streamed_plate_pick_cycle.py", commands[2])
         self.assertTrue(all("--force-restore-top" in command for command in commands))
+
+    def test_plate_d_uses_direct_facing_release_mode(self):
+        plate = tasks()[2]
+        command = " ".join(
+            mission.search_argv(
+                config(), plate.plan, "plate", plate_direct_place_on_d=True
+            )
+        )
+        self.assertIn("--plate-direct-place-on-d", command)
 
     def test_runtime_returns_after_first_two_but_stops_after_plate(self):
         values = tasks()
@@ -100,7 +116,7 @@ class ThreeObjectDeliveryContracts(unittest.TestCase):
             if label.endswith("-search"):
                 name = label.split("-")[0]
                 letter = {item.name: item.letter for item in values}[name]
-                return {"status": "success", "target_centered": True, "target_letter": letter, "row": "near", "actual_right_m": 1.2, "zero_command_latched": True}
+                return {"status": "success", "target_centered": True, "target_letter": letter, "row": "near", "actual_right_m": 1.2, "center_error_norm": 0.02, "evidence_saved": True, "zero_command_latched": True}
             if label.endswith("-place"):
                 return {"status": "complete", "phase": "DONE", "released": True, "stable_hold_recovery_attempt": 1}
             if label.endswith("-return"):
@@ -125,6 +141,7 @@ class ThreeObjectDeliveryContracts(unittest.TestCase):
             args = SimpleNamespace(
                 checkpoint=root / "state.json",
                 log_dir=root / "logs",
+                base_startup_timeout_s=150.0,
                 base_phase_timeout_s=180.0,
                 search_timeout_s=120.0,
                 return_timeout_s=240.0,
@@ -182,7 +199,10 @@ class ThreeObjectDeliveryContracts(unittest.TestCase):
                 with self.assertRaises(mission.MissionError):
                     mission.run_locked(args, config(), values)
 
-        self.assertEqual(labels, ["control-mission", "dual-init", "control-teleop"])
+        self.assertEqual(
+            labels,
+            ["control-mission", "dual-init", "dual-init-retry", "control-teleop"],
+        )
 
     def test_confirmed_cup_held_resume_does_not_reopen_or_repick_cup(self):
         values = tasks()
@@ -206,7 +226,7 @@ class ThreeObjectDeliveryContracts(unittest.TestCase):
             if label.endswith("-search"):
                 name = label.split("-")[0]
                 letter = {item.name: item.letter for item in values}[name]
-                return {"status": "success", "target_centered": True, "target_letter": letter, "row": "near", "actual_right_m": 1.2, "zero_command_latched": True}
+                return {"status": "success", "target_centered": True, "target_letter": letter, "row": "near", "actual_right_m": 1.2, "center_error_norm": 0.02, "evidence_saved": True, "zero_command_latched": True}
             if label.endswith("-place"):
                 return {"status": "complete", "phase": "DONE", "released": True, "stable_hold_recovery_attempt": 1}
             if label.endswith("-return"):
@@ -221,6 +241,7 @@ class ThreeObjectDeliveryContracts(unittest.TestCase):
             root = Path(directory)
             args = SimpleNamespace(
                 checkpoint=root / "state.json", log_dir=root / "logs",
+                base_startup_timeout_s=150.0,
                 base_phase_timeout_s=180.0, search_timeout_s=120.0,
                 return_timeout_s=240.0, resume_at_pickup_confirmed=False,
                 resume_after_cup_held_confirmed=True,
@@ -237,6 +258,64 @@ class ThreeObjectDeliveryContracts(unittest.TestCase):
         self.assertNotIn("cup-pick", labels)
         self.assertIn("cup-prepare", labels)
         self.assertIn("bowl-pick", labels)
+
+    def test_confirmed_plate_at_pickup_resume_skips_delivered_cup_and_bowl(self):
+        values = tasks()
+        labels = []
+
+        def report_for(label):
+            if label == "control-mission":
+                return {"status": "success", "mode": "mission", "teleop_velocity_enabled": False, "mission_lease": True}
+            if label == "control-teleop":
+                return {"status": "success", "mode": "teleop", "teleop_velocity_enabled": True, "mission_lease": False}
+            if label == "plate-prepare":
+                return {
+                    "status": "complete", "next_stage": 3,
+                    "zero_command_latched": True,
+                    "reports": [
+                        {"stage": "RETREAT_TO_PREDOOR", "actual_forward_m": -1.684},
+                        {"stage": "TURN_CCW180", "actual_ccw_deg": 179.34},
+                        {"stage": "BACKWARD_AFTER_TURN", "actual_forward_m": -0.2342},
+                    ],
+                }
+            if label == "plate-search":
+                return {"status": "success", "target_centered": True, "target_letter": "D", "row": "near", "actual_right_m": 1.2, "center_error_norm": 0.02, "evidence_saved": True, "zero_command_latched": True}
+            if label == "plate-place":
+                return {"status": "complete", "phase": "DONE", "released": True, "stable_hold_recovery_attempt": 1}
+            return {}
+
+        def fake_run(label, _argv, _timeout, _log):
+            labels.append(label)
+            return SimpleNamespace(returncode=0, output=json.dumps(report_for(label)))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(
+                checkpoint=root / "state.json", log_dir=root / "logs",
+                base_startup_timeout_s=150.0,
+                base_phase_timeout_s=180.0, search_timeout_s=120.0,
+                return_timeout_s=240.0, resume_at_pickup_confirmed=False,
+                resume_after_cup_held_confirmed=False,
+                resume_object_at_pickup_confirmed="plate",
+            )
+            with (
+                mock.patch.object(mission, "run_streamed_command", side_effect=fake_run),
+                mock.patch.object(mission, "pick_report_is_stable", return_value=(True, {})),
+            ):
+                result = mission.run_locked(args, config(), values)
+            final = json.loads(args.checkpoint.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            labels,
+            [
+                "control-mission", "plate-pick", "plate-prepare",
+                "plate-search", "plate-place", "control-teleop",
+            ],
+        )
+        self.assertEqual(final["completed"], ["cup", "bowl", "plate"])
+        self.assertTrue(final["deliveries"]["cup"]["resumed_as_already_delivered"])
+        self.assertTrue(final["deliveries"]["bowl"]["resumed_as_already_delivered"])
 
 
 if __name__ == "__main__":

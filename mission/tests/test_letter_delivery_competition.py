@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 import sys
 import unittest
@@ -42,25 +43,40 @@ class LetterDeliveryContracts(unittest.TestCase):
         self.assertEqual(self.plan.target_letter, "B")
         self.assertEqual(self.plan.requested_row, "auto")
         self.assertEqual(self.plan.maximum_right_m, 2.4)
+        self.assertEqual(self.plan.minimum_detection_right_m, 0.4)
         self.assertEqual((self.plan.door_before_m, self.plan.door_forward_m), (0.5, 1.2))
 
     def test_near_and_far_placement_are_distinct(self) -> None:
-        self.assertEqual(mission.placement_values(self.plan, "near"), (0.0, 0.36))
-        self.assertEqual(mission.placement_values(self.plan, "far"), (0.16, 0.36))
+        self.assertEqual(mission.placement_values(self.plan, "near"), (0.1, 0.36))
+        self.assertEqual(mission.placement_values(self.plan, "far"), (0.26, 0.36))
         far = " ".join(mission.letter_place_argv(full_config(), self.plan, "far", "run"))
         self.assertIn("--placement-row far", far)
-        self.assertIn("--forward-m 0.160", far)
+        self.assertIn("--forward-m 0.260", far)
 
     def test_search_command_is_targeted_and_bounded(self) -> None:
         command = " ".join(mission.search_argv(full_config(), self.plan, "run"))
         self.assertIn("--target-letter B", command)
         self.assertIn("--max-right-m 2.400", command)
+        self.assertIn("--min-detection-right-m 0.400", command)
+        self.assertIn("--evidence-image", command)
         self.assertIn("--row auto", command)
+
+    def test_plate_d_direct_mode_is_explicit_and_disables_extra_offset(self) -> None:
+        plan = mission.load_plan(mission.DEFAULT_DELIVERY_CONFIG, "B", None)
+        plan = replace(plan, target_letter="D", alphabet="ABCDE")
+        command = " ".join(
+            mission.search_argv(
+                full_config(), plan, "plate", plate_direct_place_on_d=True
+            )
+        )
+        self.assertIn("--plate-direct-place-on-d", command)
 
     def test_return_uses_measured_search_distance(self) -> None:
         command = " ".join(mission.return_argv(full_config(), self.plan, 1.2345, "run"))
         self.assertIn("--left-m 1.2345", command)
         self.assertIn("--turn-cw-deg 180.000", command)
+        # The base-side return command adds its standard 0.20 m post-place margin.
+        self.assertNotIn("--extra-left-m", command)
 
     def test_structured_reports_are_required(self) -> None:
         search_report = {
@@ -69,6 +85,8 @@ class LetterDeliveryContracts(unittest.TestCase):
             "target_letter": "B",
             "row": "near",
             "actual_right_m": 1.2,
+            "center_error_norm": 0.02,
+            "evidence_saved": True,
             "zero_command_latched": True,
         }
         self.assertTrue(mission.search_report_ok(search_report, self.plan))

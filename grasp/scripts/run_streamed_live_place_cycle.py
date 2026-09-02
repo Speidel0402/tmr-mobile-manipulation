@@ -26,6 +26,7 @@ from servo_cup_edge_xy import JOINT_NAMES, ServoNode
 
 
 GRIPPER_ACTION = "/left/gripper/robotiq_gripper_controller/gripper_cmd"
+MAX_LOWERING_X_M = 1.00
 
 
 def emit(event: str, **values) -> None:
@@ -146,18 +147,15 @@ def main() -> int:
     args = parser.parse_args()
     if not 0.18 <= args.down_m <= 0.38:
         raise RuntimeError("down-m outside placement range 0.18..0.38 m")
-    if not 0.0 <= args.forward_m <= 0.20:
-        raise RuntimeError("forward-m outside bounded placement range 0.00..0.20 m")
-    if args.placement_row == "near" and args.forward_m > 0.005:
-        raise RuntimeError("near placement must use the already verified zero extension")
-    if args.placement_row == "far" and args.forward_m < 0.05:
+    if not 0.0 <= args.forward_m <= 0.30:
+        raise RuntimeError("forward-m outside bounded placement range 0.00..0.30 m")
+    if args.placement_row == "near" and args.forward_m > 0.15:
+        raise RuntimeError("near placement extension must remain within 0.15 m")
+    if args.placement_row == "far" and args.forward_m < 0.15:
         raise RuntimeError("far placement requires an explicit bounded extension")
-    sequence = ["capture_current_top"]
-    if args.forward_m > 0.005:
-        sequence.append("extend_forward")
+    sequence = ["capture_current_top", "move_to_bounded_lowering_staging"]
     sequence.extend(["down", "open", "up"])
-    if args.forward_m > 0.005:
-        sequence.append("retract_to_captured_top")
+    sequence.append("retract_only_if_original_top_was_inside_lowering_envelope")
     sequence.append("stable_hold")
     summary = {
         "sequence": sequence,
@@ -202,12 +200,18 @@ def main() -> int:
         impedance_off = True
         time.sleep(0.35)
         staging_target = Pose()
-        staging_target.position.x = top_target.position.x + float(args.forward_m)
+        requested_staging_x = top_target.position.x + float(args.forward_m)
+        staging_target.position.x = min(requested_staging_x, MAX_LOWERING_X_M)
         staging_target.position.y = top_target.position.y
         staging_target.position.z = top_target.position.z
         staging_target.orientation = top_target.orientation
-        if args.forward_m > 0.005:
-            phase = state["phase"] = "EXTENDING_TO_ROW"
+        effective_forward_m = staging_target.position.x - top_target.position.x
+        state["requested_staging_x_m"] = requested_staging_x
+        state["bounded_staging_x_m"] = staging_target.position.x
+        state["effective_forward_m"] = effective_forward_m
+        state["lowering_x_limit_m"] = MAX_LOWERING_X_M
+        if abs(effective_forward_m) > 0.005:
+            phase = state["phase"] = "MOVING_TO_BOUNDED_LOWERING_STAGING"
             write_state(args.state_file, state)
             state["extension_report"] = move_cartesian_to(
                 arm, staging_target, "bounded_forward_extension"
@@ -238,7 +242,10 @@ def main() -> int:
         write_state(args.state_file, state)
         up_report = move_cartesian_to(arm, staging_target, "up_after_open")
         state["up_report"] = up_report
-        if args.forward_m > 0.005:
+        # Restore only a top pose that was already inside the proven lowering
+        # envelope.  If this invocation began beyond it (e.g. after a failed
+        # over-extension), remain at the recovered staging pose.
+        if effective_forward_m > 0.005 and top_target.position.x <= MAX_LOWERING_X_M:
             phase = state["phase"] = "RETRACTING_AFTER_RELEASE"
             write_state(args.state_file, state)
             state["retraction_report"] = move_cartesian_to(
@@ -257,7 +264,7 @@ def main() -> int:
         state["error"] = failure
         emit("failure", phase=failed_phase, detail=failure)
         if top_target is not None and failed_phase in {
-            "EXTENDING_TO_ROW",
+            "MOVING_TO_BOUNDED_LOWERING_STAGING",
             "AT_EXTENDED_TOP",
             "DESCENDING",
             "AT_LOW_GRIPPER_STILL_CLOSED",

@@ -1,5 +1,19 @@
 # 综合长程抓取流程
 
+## 最终三物体比赛入口（2026-09-02 实机通过）
+
+从标记起点完整运行杯子→B、食物盆→A、盘子→D：
+
+```bash
+cd /home/aup/tmr-mobile-manipulation
+bash mission/scripts/run_complete_from_start.sh \
+  --cup-letter B --bowl-letter A --plate-letter D
+```
+
+该入口固定调用 `run_three_object_delivery.py --execute --fresh-start-confirmed`，并禁止误传中途恢复参数。本次完整实机运行编号为 `36a78660aa63`，三次抓取、三次字母授权、三次释放均完成，最后自动恢复手柄控制。杯子、食物盆和盘子的下降量分别为 `0.340/0.360/0.375 m`；盘子面对 D 时连续两帧确认即直接放置，不再附加横移。
+
+仓库根目录 [`README.md`](../README.md) 记录最终参数、一键运行要求、控制器/里程计/相机故障恢复和分物体续跑命令。下文保留单段入口，供诊断与受控恢复使用。
+
 入口：`scripts/run_long_range_pick.py`。
 
 该协调器运行在机械臂主机 `172.16.0.100`，只负责阶段切换：底盘的闭环速度控制始终在 `172.16.0.50` 本地执行，视觉、机械臂和夹爪控制始终在 `172.16.0.100` 本地执行。SSH 不承载任何实时控制流。

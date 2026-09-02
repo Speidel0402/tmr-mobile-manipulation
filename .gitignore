@@ -12,6 +12,8 @@ log/
 logs/
 outputs/
 artifacts/
+.debug/
+/plate_debug_*.jpg
 /config/zed_letters_override.yaml
 *.log
 *.bag

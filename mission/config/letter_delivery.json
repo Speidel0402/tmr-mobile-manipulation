@@ -6,9 +6,10 @@
   },
   "search": {
     "maximum_right_m": 2.4,
+    "minimum_detection_right_m": 0.4,
     "search_speed_mps": 0.055,
     "refine_speed_mps": 0.04,
-    "center_tolerance_norm": 0.070,
+    "center_tolerance_norm": 0.055,
     "stable_frames": 3,
     "minimum_confidence": 0.22,
     "row_split_y_norm": 0.52,
@@ -16,11 +17,11 @@
   },
   "placement": {
     "near": {
-      "forward_extension_m": 0.0,
+      "forward_extension_m": 0.1,
       "descent_m": 0.360
     },
     "far": {
-      "forward_extension_m": 0.16,
+      "forward_extension_m": 0.26,
       "descent_m": 0.360
     }
   },

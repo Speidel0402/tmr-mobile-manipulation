@@ -75,6 +75,7 @@ class DeliveryPlan:
     requested_row: str
     alphabet: str
     maximum_right_m: float
+    minimum_detection_right_m: float
     search_speed_mps: float
     refine_speed_mps: float
     center_tolerance_norm: float
@@ -117,6 +118,7 @@ def load_plan(path: Path, target_override: str | None, row_override: str | None)
         requested_row=row,
         alphabet=alphabet,
         maximum_right_m=float(search["maximum_right_m"]),
+        minimum_detection_right_m=float(search.get("minimum_detection_right_m", 0.40)),
         search_speed_mps=float(search["search_speed_mps"]),
         refine_speed_mps=float(search["refine_speed_mps"]),
         center_tolerance_norm=float(search["center_tolerance_norm"]),
@@ -134,10 +136,12 @@ def load_plan(path: Path, target_override: str | None, row_override: str | None)
     )
     if not 0.20 <= plan.maximum_right_m <= 2.40:
         raise MissionError("maximum right search must remain in [0.20, 2.40] m")
-    if abs(plan.near_forward_m) > 0.005:
-        raise MissionError("near row must preserve the verified zero-extension placement")
-    if not 0.05 <= plan.far_forward_m <= 0.20:
-        raise MissionError("far row extension must remain in [0.05, 0.20] m")
+    if not 0.0 <= plan.minimum_detection_right_m < plan.maximum_right_m:
+        raise MissionError("minimum detection distance must precede the right search limit")
+    if not 0.095 <= plan.near_forward_m <= 0.105:
+        raise MissionError("near row must include the requested 0.10 m forward placement offset")
+    if not 0.255 <= plan.far_forward_m <= 0.265:
+        raise MissionError("far row must include the requested 0.10 m forward placement offset")
     if abs(plan.door_before_m - 0.50) > 1e-9 or abs(plan.door_forward_m - 1.20) > 1e-9:
         raise MissionError("return must preserve door centre -> 0.50 m -> 1.20 m")
     return plan
@@ -173,16 +177,24 @@ def remote_argv(config: FullConfig, command: str) -> list[str]:
     ]
 
 
-def prepare_search_argv(config: FullConfig, run_id: str) -> list[str]:
+def prepare_search_argv(
+    config: FullConfig, run_id: str, backward_m: float = 0.25
+) -> list[str]:
     runner = shlex.quote(f"{config.base_root}/scripts/13_run_post_grasp_route.sh")
     state = shlex.quote(f"/tmp/tmr_letter_prepare_{run_id}.json")
     return remote_argv(
         config,
-        f"{runner} --execute --fresh-start --stop-before-right --state-file {state}",
+        f"{runner} --execute --fresh-start --stop-before-right "
+        f"--backward-m {backward_m:.3f} --state-file {state}",
     )
 
 
-def search_argv(config: FullConfig, plan: DeliveryPlan, run_id: str) -> list[str]:
+def search_argv(
+    config: FullConfig,
+    plan: DeliveryPlan,
+    run_id: str,
+    plate_direct_place_on_d: bool = False,
+) -> list[str]:
     runner = shlex.quote(f"{config.base_root}/scripts/14_run_letter_guided_search.sh")
     arguments = [
         "--execute",
@@ -191,14 +203,19 @@ def search_argv(config: FullConfig, plan: DeliveryPlan, run_id: str) -> list[str
         "--alphabet", plan.alphabet,
         "--camera-topic", plan.camera_topic,
         "--max-right-m", f"{plan.maximum_right_m:.3f}",
+        "--min-detection-right-m", f"{plan.minimum_detection_right_m:.3f}",
         "--search-speed-mps", f"{plan.search_speed_mps:.4f}",
         "--refine-speed-mps", f"{plan.refine_speed_mps:.4f}",
         "--center-tolerance-norm", f"{plan.center_tolerance_norm:.4f}",
+        "--post-center-right-m", "0.080",
         "--stable-frames", str(plan.stable_frames),
         "--minimum-confidence", f"{plan.minimum_confidence:.4f}",
         "--row-split-y-norm", f"{plan.row_split_y_norm:.4f}",
         "--state-file", f"/tmp/tmr_letter_search_{run_id}.json",
+        "--evidence-image", f"/tmp/tmr_letter_search_{run_id}_authorized.jpg",
     ]
+    if plate_direct_place_on_d:
+        arguments.append("--plate-direct-place-on-d")
     return remote_argv(config, runner + " " + " ".join(shlex.quote(item) for item in arguments))
 
 
@@ -256,14 +273,29 @@ def preparation_report_ok(report: dict | None) -> bool:
     )
 
 
-def search_report_ok(report: dict | None, plan: DeliveryPlan) -> bool:
+def search_report_ok(
+    report: dict | None,
+    plan: DeliveryPlan,
+    plate_direct_place_on_d: bool = False,
+) -> bool:
+    direct_plate_mode = bool(
+        plate_direct_place_on_d
+        and isinstance(report, dict)
+        and report.get("target_letter") == "D"
+        and report.get("post_center_right_requested_m") == 0.0
+    )
+    center_limit = 0.222 if direct_plate_mode else plan.center_tolerance_norm + 0.002
     return bool(
         isinstance(report, dict)
         and report.get("status") == "success"
         and report.get("target_centered") is True
         and report.get("target_letter") == plan.target_letter
         and report.get("row") in {"near", "far"}
-        and 0.0 <= float(report.get("actual_right_m", -1.0)) <= plan.maximum_right_m + 0.04
+        and plan.minimum_detection_right_m - 0.04
+        <= float(report.get("actual_right_m", -1.0))
+        <= plan.maximum_right_m + 0.04
+        and abs(float(report.get("center_error_norm", 1.0))) <= center_limit
+        and report.get("evidence_saved") is True
         and report.get("zero_command_latched") is True
     )
 
@@ -326,7 +358,7 @@ def strategy(
         [
         "retreat 1.70 m -> CCW 180 deg -> backward 0.25 m",
         f"right letter search <= {plan.maximum_right_m:.2f} m -> temporal center lock",
-        "near: direct vertical place; far: fixed 0.16 m extension -> vertical place -> retract",
+        "near: forward 0.10 m -> vertical place; far: forward 0.26 m -> vertical place -> retract",
         ]
     )
     if not stop_after_place:

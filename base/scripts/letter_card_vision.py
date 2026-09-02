@@ -106,7 +106,76 @@ def white_card_quads(image: np.ndarray) -> list[np.ndarray]:
         if qx < 3 or qy < 3 or qx + qw >= width - 3 or qy + qh >= height - 3:
             continue
         quads.append(quad)
-    return quads
+    # A low-saturation card can become connected to a large white robot part
+    # in the HSV mask and therefore disappear as its own component.  Recover
+    # those cards from their rectangular edge contour.  This is still a
+    # lightweight CPU path and is especially important for the near A card.
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 45, 130)
+    edge_kernel = max(3, int(round(2.5 * scale)) | 1)
+    edges = cv2.morphologyEx(
+        edges,
+        cv2.MORPH_CLOSE,
+        np.ones((edge_kernel, edge_kernel), np.uint8),
+        iterations=2,
+    )
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    edge_quads: list[np.ndarray] = []
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if not min_area <= area <= 4.0 * max_area:
+            continue
+        x, y, w, h = cv2.boundingRect(contour)
+        if y < int(0.14 * height) or min(w, h) < 7 * scale or max(w, h) > 120 * scale:
+            continue
+        if max(w, h) / max(1.0, min(w, h)) > 2.7:
+            continue
+        rectangle = cv2.minAreaRect(contour)
+        rw, rh = rectangle[1]
+        rectangle_area = max(1.0, float(rw * rh))
+        if min(rw, rh) < 7 * scale or area / rectangle_area < 0.42:
+            continue
+        quad = cv2.boxPoints(rectangle).astype(np.float32)
+        center = np.mean(quad, axis=0)
+        area_norm = area / float(width * height)
+        # The edge fallback is specifically for close cards whose white mask
+        # merged with the robot/background.  Applying it to the whole robot
+        # silhouette created many convincing but false A glyphs.
+        if center[1] / height < 0.52 or not 0.0015 <= area_norm <= 0.0080:
+            continue
+        qx, qy, qw, qh = cv2.boundingRect(quad.astype(np.int32))
+        if qx < 3 or qy < 3 or qx + qw >= width - 3 or qy + qh >= height - 3:
+            continue
+        card = warp_quad(image, quad)
+        card_hsv = cv2.cvtColor(card, cv2.COLOR_BGR2HSV)
+        pale_fraction = float(
+            np.mean((card_hsv[:, :, 1] <= 100) & (card_hsv[:, :, 2] >= 135))
+        )
+        if pale_fraction < 0.55 or normalized_glyph(card) is None:
+            continue
+        edge_quads.append(quad)
+
+    # Prefer the largest outline and suppress inner letter contours / duplicate
+    # HSV proposals for the same physical card.
+    candidates = sorted(
+        [*quads, *edge_quads], key=lambda item: abs(float(cv2.contourArea(item))), reverse=True
+    )
+    selected: list[np.ndarray] = []
+    for candidate in candidates:
+        x, y, w, h = cv2.boundingRect(candidate.astype(np.int32))
+        duplicate = False
+        for existing in selected:
+            ex, ey, ew, eh = cv2.boundingRect(existing.astype(np.int32))
+            ix0, iy0 = max(x, ex), max(y, ey)
+            ix1, iy1 = min(x + w, ex + ew), min(y + h, ey + eh)
+            intersection = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+            smaller = max(1, min(w * h, ew * eh))
+            if intersection / smaller >= 0.45:
+                duplicate = True
+                break
+        if not duplicate:
+            selected.append(candidate)
+    return selected
 
 
 def _remove_long_occlusions(mask: np.ndarray) -> np.ndarray:
@@ -214,6 +283,39 @@ def _binary_similarity(first: np.ndarray, second: np.ndarray) -> float:
     return float(0.58 * iou + 0.42 * math.exp(-chamfer / 4.0))
 
 
+def card_surface_is_white(
+    card: np.ndarray,
+    minimum_fraction: float = 0.45,
+    minimum_border_fraction: float = 0.50,
+    minimum_corner_fraction: float = 0.30,
+) -> bool:
+    """Require a bright rectangular paper substrate, not merely a grey patch.
+
+    The floor reflections and the white food plate both produced plausible
+    glyph contours in competition frames.  A real label has bright neutral
+    paper over its whole surface, around its border, and in all four corner
+    regions.  The circular plate fails the corner test; grey floor tiles fail
+    all three brightness tests.
+    """
+    hsv = cv2.cvtColor(card, cv2.COLOR_BGR2HSV)
+    bright_white = (hsv[:, :, 1] <= 70) & (hsv[:, :, 2] >= 170)
+    height, width = bright_white.shape
+    margin_y = max(2, int(round(0.16 * height)))
+    margin_x = max(2, int(round(0.16 * width)))
+    border = np.ones_like(bright_white, dtype=bool)
+    border[margin_y:-margin_y, margin_x:-margin_x] = False
+    corners = np.zeros_like(bright_white, dtype=bool)
+    corners[:margin_y, :margin_x] = True
+    corners[:margin_y, -margin_x:] = True
+    corners[-margin_y:, :margin_x] = True
+    corners[-margin_y:, -margin_x:] = True
+    return bool(
+        float(np.mean(bright_white)) >= float(minimum_fraction)
+        and float(np.mean(bright_white[border])) >= float(minimum_border_fraction)
+        and float(np.mean(bright_white[corners])) >= float(minimum_corner_fraction)
+    )
+
+
 class LetterCardRecognizer:
     def __init__(
         self,
@@ -256,23 +358,32 @@ class LetterCardRecognizer:
                 scores[letter] = max(
                     scores[letter], max(_binary_similarity(glyph, template) for template in templates)
                 )
-        if holes >= 2 and "B" in scores:
-            return "B", max(0.86, min(0.98, scores["B"]))
-        if holes == 0:
-            # Do not mistake a blurred E/A for B/O/P simply because the outer
-            # silhouette is similar.  A is retained because a cable can hide
-            # its single counter; the temporal tracker will demand repetition.
-            normally_enclosed = set("BDOPQR")
-            eligible = {
-                letter: score
-                for letter, score in scores.items()
-                if letter not in normally_enclosed
-            }
-            if eligible:
-                scores = eligible
+        if holes >= 2 and "B" in scores and scores["B"] >= 0.60:
+            # Two holes are supporting evidence, not proof of B.  The old
+            # unconditional 0.86 result promoted unrelated two-hole shapes
+            # in a no-card scene to a target letter immediately after turn.
+            scores["B"] = min(1.0, scores["B"] + 0.06)
+        # Topology is an authorization condition for the three competition
+        # targets, not just a score hint.  Previously, an E card was forced to
+        # A when recognition was restricted to ABD, and a floor seam could do
+        # the same.  Clean printed A/D have one counter and B has two.
+        required_holes = {"A": 1, "B": 2, "D": 1}
+        raw_scores = dict(scores)
+        scores = {
+            letter: score
+            for letter, score in scores.items()
+            if letter not in required_holes or holes == required_holes[letter]
+        }
+        if not scores:
+            return "", 0.0
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         letter, score = ranked[0]
-        runner_up = ranked[1][1] if len(ranked) > 1 else 0.0
+        # Topology may disqualify a class, but it must not artificially inflate
+        # the winning confidence by erasing a visually similar runner-up.
+        runner_up = max(
+            (value for name, value in raw_scores.items() if name != letter),
+            default=0.0,
+        )
         confidence = max(0.0, min(1.0, 0.65 * score + 0.35 * max(0.0, score - runner_up) * 3.0))
         return letter, confidence
 
@@ -280,7 +391,10 @@ class LetterCardRecognizer:
         height, width = image.shape[:2]
         detections = []
         for quad in white_card_quads(image):
-            letter, confidence = self.classify(warp_quad(image, quad))
+            card = warp_quad(image, quad)
+            if not card_surface_is_white(card):
+                continue
+            letter, confidence = self.classify(card)
             if confidence < self.minimum_confidence:
                 continue
             center = np.mean(quad, axis=0)

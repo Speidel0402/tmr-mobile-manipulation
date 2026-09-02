@@ -22,12 +22,12 @@ class LetterPlaceSequenceContracts(unittest.TestCase):
         locations = [SOURCE.index(item) for item in ordered]
         self.assertEqual(locations, sorted(locations))
 
-    def test_near_keeps_verified_zero_extension(self) -> None:
-        self.assertIn('args.placement_row == "near" and args.forward_m > 0.005', SOURCE)
+    def test_near_accepts_requested_ten_centimetre_extension(self) -> None:
+        self.assertIn('args.placement_row == "near" and args.forward_m > 0.15', SOURCE)
         self.assertIn('parser.add_argument("--forward-m", type=float, default=0.0)', SOURCE)
 
     def test_far_extension_is_bounded_and_reversible(self) -> None:
-        self.assertIn("0.0 <= args.forward_m <= 0.20", SOURCE)
+        self.assertIn("0.0 <= args.forward_m <= 0.30", SOURCE)
         self.assertIn('"bounded_fault_recovery_retract"', SOURCE)
 
 

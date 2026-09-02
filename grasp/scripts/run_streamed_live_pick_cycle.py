@@ -61,6 +61,11 @@ MAX_VISUAL_SEARCH_M = 0.38
 VISION_SETTLE_BEFORE_SAMPLE_S = 0.55
 VISION_STABLE_FRAMES = 5
 VISION_STABLE_RADIUS_PX = 8.0
+# Object-specific wrappers may loosen only these identity/stability limits.
+# Keeping them separate from point tracking prevents a small perspective-driven
+# scale change from being mistaken for a different object.
+MAX_TRACKING_RADIUS_DELTA_PX = 3.5
+MAX_STABLE_RADIUS_SPREAD_PX = 3.0
 MAX_HIGH_GRASP_PLANE_RESIDUAL_M = 0.020
 REFERENCE_Q = np.asarray(
     [0.6965795194017754, 0.7171679017330287, 0.006319729771827597, 0.020180061680965224],
@@ -207,7 +212,8 @@ def detect_cup_right(
             radius_px = rim_radius_from_detail(detail)
             if (
                 expected_radius_px is not None
-                and abs(radius_px - float(expected_radius_px)) > 3.5
+                and abs(radius_px - float(expected_radius_px))
+                > MAX_TRACKING_RADIUS_DELTA_PX
             ):
                 last_error = (
                     f"rim identity changed: radius {radius_px:.2f}px versus "
@@ -237,7 +243,7 @@ def detect_cup_right(
                 radius_spread = float(np.max(np.abs(radii - radius_center)))
                 if (
                     float(np.max(deviations)) <= VISION_STABLE_RADIUS_PX
-                    and radius_spread <= 3.0
+                    and radius_spread <= MAX_STABLE_RADIUS_SPREAD_PX
                 ):
                     point = center
                     return {
@@ -759,13 +765,38 @@ def calibrate(arm, camera_session_id, preflight_stamp):
                 "visual correction reached a kinematic boundary before a usable alignment"
             ) from exc
         predicted_point = current_point + jacobian @ actual
-        observation = detect_cup_right(
-            previous_stamp=stamp,
-            expected_session_id=camera_session_id,
-            expected_point=predicted_point,
-            expected_radius_px=reference_radius_px,
-            maximum_tracking_error_px=70.0,
-        )
+        try:
+            observation = detect_cup_right(
+                previous_stamp=stamp,
+                expected_session_id=camera_session_id,
+                expected_point=predicted_point,
+                expected_radius_px=reference_radius_px,
+                maximum_tracking_error_px=70.0,
+            )
+        except RuntimeError as exc:
+            # A final correction can briefly hide the rim behind a finger or
+            # cable.  Return to the best measured joint pose and demand fresh
+            # reconfirmation there instead of aborting at the worst pose.
+            emit(
+                "correction_detection_lost",
+                iteration=iteration,
+                best_error_norm_px=float(best["norm"]),
+                detail=str(exc),
+            )
+            recovered = recover_best_visual_pose(
+                arm,
+                best,
+                stamp,
+                camera_session_id,
+                iteration - 1,
+                "detection_lost_after_correction",
+            )
+            if recovered is not None:
+                return recovered
+            restore_recorded_top_joint_pose(arm)
+            raise RuntimeError(
+                "target lost after correction and best pose could not be freshly reconfirmed"
+            ) from exc
         stamp = observation["stamp"]
         new_point = observation["point"]
         observed = new_point - current_point

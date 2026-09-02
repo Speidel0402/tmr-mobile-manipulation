@@ -103,9 +103,11 @@ def build_tasks(
     ]
     if len(set(letters)) != 3:
         raise MissionError("cup, bowl, and plate letters must be distinct")
-    # Restrict recognition to the three configured cards.  This is faster and
-    # reduces glyph ambiguity compared with classifying the whole alphabet.
-    alphabet = "".join(sorted(letters))
+    # Classify against every label used at the venue before checking the
+    # requested target.  Restricting this to ABD forced a visible E card to be
+    # reported as A and authorized an early placement.
+    venue_alphabet = "ABCDE"
+    alphabet = "".join(dict.fromkeys(venue_alphabet + "".join(letters)))
     tasks = []
     for (name, pick_script, pick_descent_m), letter in zip(OBJECT_SPECS, letters):
         plan = replace(
@@ -206,6 +208,8 @@ def letter_place_argv(
     arm_host: str = DEFAULT_ARM_HOST,
 ) -> list[str]:
     forward, down = placement_values(task.plan, row)
+    if task.name == "bowl":
+        forward = 0.07
     return remote_arm_argv(
         config,
         "grasp/scripts/run_streamed_live_place_cycle.py",
@@ -238,6 +242,13 @@ def control_mode_argv(config: FullConfig, mode: str) -> list[str]:
     if mode not in {"mission", "teleop"}:
         raise MissionError(f"invalid base control mode: {mode}")
     runner = shlex.quote(f"{config.base_root}/scripts/17_control_mode.sh")
+    ensure = shlex.quote(f"{config.base_root}/scripts/19_ensure_navigation_stack.sh")
+    command = f"{runner} {mode}"
+    if mode == "mission":
+        # A fresh competition invocation must be self-sufficient when the
+        # base stack is absent, yet reuse a healthy stack without restarting
+        # hardware or creating duplicate command adapters.
+        command = f"{ensure} && {command}"
     return [
         "ssh",
         "-o", "BatchMode=yes",
@@ -245,7 +256,7 @@ def control_mode_argv(config: FullConfig, mode: str) -> list[str]:
         "-o", "ServerAliveInterval=2",
         "-o", "ServerAliveCountMax=3",
         config.base_host,
-        f"{runner} {mode}",
+        command,
     ]
 
 
@@ -280,7 +291,7 @@ def strategy(config: FullConfig, tasks: list[ObjectDelivery], checkpoint: Path) 
         )
         if index < len(tasks) - 1:
             phases.append(
-                f"{task.name}: measured left -> CW 180 deg -> verify doorway -> pickup table"
+                f"{task.name}: measured left + 0.20 m -> CW 180 deg -> verify doorway -> pickup table"
             )
     phases.append("plate placement complete -> final zero hold -> restore Xbox teleoperation")
     return {
@@ -335,12 +346,14 @@ def run(args: argparse.Namespace) -> int:
         bool(args.fresh_start_confirmed),
         bool(args.resume_at_pickup_confirmed),
         bool(getattr(args, "resume_after_cup_held_confirmed", False)),
+        bool(getattr(args, "resume_object_at_pickup_confirmed", None)),
     )
     if sum(start_modes) > 1:
         raise MissionError("choose exactly one confirmed start/resume mode")
     if not any(start_modes):
         raise MissionError(
-            "execution requires a confirmed fresh, pickup-table, or cup-held start"
+            "execution requires a confirmed fresh, pickup-table, held-cup, "
+            "or object-at-pickup start"
         )
     previous = load_checkpoint(args.checkpoint)
     if previous is not None:
@@ -370,8 +383,20 @@ def run_locked(
     run_id = uuid.uuid4().hex[:12]
     logs = args.log_dir / run_id
     phase = "CREATED"
-    completed: list[str] = []
-    deliveries: dict[str, dict] = {}
+    resume_object = getattr(args, "resume_object_at_pickup_confirmed", None)
+    resume_index = 0
+    if resume_object is not None:
+        resume_index = next(
+            index for index, task in enumerate(tasks) if task.name == resume_object
+        )
+    completed: list[str] = [task.name for task in tasks[:resume_index]]
+    deliveries: dict[str, dict] = {
+        task.name: {
+            "letter": task.letter,
+            "resumed_as_already_delivered": True,
+        }
+        for task in tasks[:resume_index]
+    }
     save_checkpoint(args.checkpoint, run_id, phase, tasks, completed=completed)
 
     def execute(label: str, argv: list[str], timeout_s: float):
@@ -385,14 +410,19 @@ def run_locked(
         phase = "LOCKING_MISSION_CONTROL"
         save_checkpoint(args.checkpoint, run_id, phase, tasks, completed=completed)
         result = execute(
-            "control-mission", control_mode_argv(config, "mission"), 20.0
+            "control-mission",
+            control_mode_argv(config, "mission"),
+            getattr(args, "base_startup_timeout_s", 150.0),
         )
         control_report = extract_last_json_object(result.output)
         if result.returncode != 0 or not control_mode_report_ok(control_report, "mission"):
             raise MissionError("failed to disable teleop and acquire mission control")
 
         arm_host = getattr(args, "arm_host", DEFAULT_ARM_HOST)
-        resume_at_pickup = getattr(args, "resume_at_pickup_confirmed", False)
+        resume_at_pickup = (
+            getattr(args, "resume_at_pickup_confirmed", False)
+            or resume_object is not None
+        )
         resume_after_cup_held = getattr(args, "resume_after_cup_held_confirmed", False)
         if not resume_at_pickup and not resume_after_cup_held:
             phase = "INITIALIZING_DUAL_ARMS"
@@ -400,9 +430,21 @@ def run_locked(
             result = execute(
                 "dual-init", initialization_argv(config, arm_host), config.init_timeout_s
             )
-            if result.returncode != 0 or not init_report_is_stable(
+            init_ok = result.returncode == 0 and init_report_is_stable(
                 extract_last_json_object(result.output)
-            ):
+            )
+            if not init_ok:
+                emit("dual_init_transient_retry", run_id=run_id)
+                time.sleep(1.0)
+                result = execute(
+                    "dual-init-retry",
+                    initialization_argv(config, arm_host),
+                    config.init_timeout_s,
+                )
+                init_ok = result.returncode == 0 and init_report_is_stable(
+                    extract_last_json_object(result.output)
+                )
+            if not init_ok:
                 raise MissionError("dual-arm initialization did not prove stable targets")
             settle()
 
@@ -411,9 +453,21 @@ def run_locked(
             result = execute(
                 "spine-init", spine_initialization_argv(config, arm_host), config.init_timeout_s
             )
-            if result.returncode != 0 or not spine_report_is_stable(
+            spine_ok = result.returncode == 0 and spine_report_is_stable(
                 extract_last_json_object(result.output)
-            ):
+            )
+            if not spine_ok:
+                emit("spine_init_transient_retry", run_id=run_id)
+                time.sleep(0.8)
+                result = execute(
+                    "spine-init-retry",
+                    spine_initialization_argv(config, arm_host),
+                    config.init_timeout_s,
+                )
+                spine_ok = result.returncode == 0 and spine_report_is_stable(
+                    extract_last_json_object(result.output)
+                )
+            if not spine_ok:
                 raise MissionError("spine initialization did not prove the standard height")
             settle()
 
@@ -427,10 +481,23 @@ def run_locked(
                 emit("transport_exit_ignored_after_final_stop", returncode=result.returncode)
             settle()
         else:
-            phase = "CUP_HELD_RESUMED" if resume_after_cup_held else "AT_PICKUP_RESUMED"
+            if resume_after_cup_held:
+                phase = "CUP_HELD_RESUMED"
+            elif resume_object is not None:
+                phase = f"{resume_object.upper()}_AT_PICKUP_RESUMED"
+            else:
+                phase = "AT_PICKUP_RESUMED"
             save_checkpoint(args.checkpoint, run_id, phase, tasks, completed=completed)
 
         for index, task in enumerate(tasks):
+            if index < resume_index:
+                emit(
+                    "object_skipped_already_delivered",
+                    run_id=run_id,
+                    object=task.name,
+                    letter=task.letter,
+                )
+                continue
             stage_id = f"{run_id}_{task.name}"
             if index == 0 and resume_after_cup_held:
                 pick_event = {
@@ -463,7 +530,11 @@ def run_locked(
             save_checkpoint(args.checkpoint, run_id, phase, tasks, completed=completed)
             result = execute(
                 f"{task.name}-prepare",
-                prepare_search_argv(config, stage_id),
+                prepare_search_argv(
+                    config,
+                    stage_id,
+                    backward_m=0.25,
+                ),
                 args.base_phase_timeout_s,
             )
             prepare_report = extract_last_json_object(result.output)
@@ -474,11 +545,20 @@ def run_locked(
             save_checkpoint(args.checkpoint, run_id, phase, tasks, completed=completed)
             result = execute(
                 f"{task.name}-search",
-                search_argv(config, task.plan, stage_id),
+                search_argv(
+                    config,
+                    task.plan,
+                    stage_id,
+                    plate_direct_place_on_d=(task.name == "plate" and task.letter == "D"),
+                ),
                 args.search_timeout_s,
             )
             search_report = extract_last_json_object(result.output)
-            if result.returncode != 0 or not search_report_ok(search_report, task.plan):
+            if result.returncode != 0 or not search_report_ok(
+                search_report,
+                task.plan,
+                plate_direct_place_on_d=(task.name == "plate" and task.letter == "D"),
+            ):
                 raise MissionError(f"{task.name} target {task.letter} was not stably centered")
             assert search_report is not None
             row = str(search_report["row"])
@@ -593,6 +673,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fresh-start-confirmed", action="store_true")
     parser.add_argument("--resume-at-pickup-confirmed", action="store_true")
     parser.add_argument("--resume-after-cup-held-confirmed", action="store_true")
+    parser.add_argument(
+        "--resume-object-at-pickup-confirmed",
+        choices=tuple(spec[0] for spec in OBJECT_SPECS),
+        help=(
+            "operator-confirmed recovery: robot is at the pickup table and "
+            "all preceding objects are already delivered"
+        ),
+    )
     parser.add_argument("--cup-letter", default="B")
     parser.add_argument("--bowl-letter", default="A")
     parser.add_argument("--plate-letter", default="D")
@@ -608,6 +696,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outbound-timeout-s", type=float, default=200.0)
     parser.add_argument("--pick-timeout-s", type=float, default=300.0)
     parser.add_argument("--base-phase-timeout-s", type=float, default=180.0)
+    parser.add_argument(
+        "--base-startup-timeout-s",
+        type=float,
+        default=150.0,
+        help="bounded first-start allowance for base controller, LiDAR and SLAM",
+    )
     parser.add_argument("--search-timeout-s", type=float, default=120.0)
     parser.add_argument("--place-timeout-s", type=float, default=220.0)
     parser.add_argument("--return-timeout-s", type=float, default=240.0)

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import threading
 import time
 import uuid
@@ -18,11 +19,12 @@ CAMERA_ROLE = "left_wrist"
 RGB_TOPIC = "/wrist_camera_left/color/image_raw"
 DEPTH_TOPIC = "/wrist_camera_left/aligned_depth_to_color/image_raw"
 CAMERA_INFO_TOPIC = "/wrist_camera_left/color/camera_info"
+VIEWER_TITLE = "Left Wrist D405"
 
 
 class CameraStreams(Node):
     def __init__(self):
-        super().__init__("temporary_camera_mjpeg_viewer")
+        super().__init__(f"temporary_camera_mjpeg_viewer_{CAMERA_ROLE}")
         self.bridge = CvBridge()
         self.lock = threading.Lock()
         self.frames = {"rgb": None, "depth": None}
@@ -36,18 +38,20 @@ class CameraStreams(Node):
             self.on_rgb,
             qos_profile_sensor_data,
         )
-        self.create_subscription(
-            Image,
-            DEPTH_TOPIC,
-            self.on_depth,
-            qos_profile_sensor_data,
-        )
-        self.create_subscription(
-            CameraInfo,
-            CAMERA_INFO_TOPIC,
-            self.on_camera_info,
-            qos_profile_sensor_data,
-        )
+        if DEPTH_TOPIC:
+            self.create_subscription(
+                Image,
+                DEPTH_TOPIC,
+                self.on_depth,
+                qos_profile_sensor_data,
+            )
+        if CAMERA_INFO_TOPIC:
+            self.create_subscription(
+                CameraInfo,
+                CAMERA_INFO_TOPIC,
+                self.on_camera_info,
+                qos_profile_sensor_data,
+            )
 
     def _store_jpeg(self, name, image):
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 82])
@@ -134,14 +138,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path in ("/", "/index.html"):
-            body = """<!doctype html><meta charset=utf-8>
-<title>Wrist Camera Live</title>
+            depth_card = "" if not DEPTH_TOPIC else """
+<div class=card><h3>Depth (0–2 m pseudo-color)</h3><img src=/depth.mjpg><p>Black = invalid; warm/cool colors indicate distance.</p></div>"""
+            body = f"""<!doctype html><meta charset=utf-8>
+<title>{VIEWER_TITLE} Live</title>
 <style>body{margin:0;background:#111;color:#eee;font-family:sans-serif}h2{margin:14px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px}.card{background:#222;padding:10px;border-radius:8px}
 img{width:100%;height:auto;background:#000}p{color:#aaa;margin:8px 0 0}</style>
-<h2>Left Wrist D405 — Live</h2><div class=grid>
+<h2>{VIEWER_TITLE} — Live</h2><div class=grid>
 <div class=card><h3>RGB</h3><img src=/rgb.mjpg></div>
-<div class=card><h3>Depth (0–2 m pseudo-color)</h3><img src=/depth.mjpg><p>Black = invalid; warm/cool colors indicate distance.</p></div>
+{depth_card}
 </div>""".encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -172,12 +178,26 @@ img{width:100%;height:auto;background:#000}p{color:#aaa;margin:8px 0 0}</style>
 
 
 def main():
+    global CAMERA_ROLE, RGB_TOPIC, DEPTH_TOPIC, CAMERA_INFO_TOPIC, VIEWER_TITLE
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=18080)
+    parser.add_argument("--camera-role", default=CAMERA_ROLE)
+    parser.add_argument("--rgb-topic", default=RGB_TOPIC)
+    parser.add_argument("--depth-topic", default=DEPTH_TOPIC)
+    parser.add_argument("--camera-info-topic", default=CAMERA_INFO_TOPIC)
+    parser.add_argument("--title", default=VIEWER_TITLE)
+    args = parser.parse_args()
+    CAMERA_ROLE = args.camera_role
+    RGB_TOPIC = args.rgb_topic
+    DEPTH_TOPIC = args.depth_topic
+    CAMERA_INFO_TOPIC = args.camera_info_topic
+    VIEWER_TITLE = args.title
     rclpy.init()
     streams = CameraStreams()
     Handler.streams = streams
     threading.Thread(target=rclpy.spin, args=(streams,), daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", 18080), Handler)
-    print("Camera viewer listening on http://127.0.0.1:18080", flush=True)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    print(f"Camera viewer listening on http://127.0.0.1:{args.port}", flush=True)
     try:
         server.serve_forever()
     finally:

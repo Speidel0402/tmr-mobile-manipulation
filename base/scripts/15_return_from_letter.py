@@ -2,8 +2,8 @@
 """Return from a letter placement to the pickup-table side.
 
 Order is fixed: translate robot-left by the measured outbound right distance,
-rotate CCW 180 degrees, then reuse the proven live doorway sequence with its
-initial forward/turn stages explicitly skipped:
+rotate clockwise 180 degrees, then reuse the proven live doorway sequence with
+its initial forward/turn stages explicitly skipped:
 door centreline -> 0.50 m before door -> forward 1.20 m -> zero-speed hold.
 """
 
@@ -169,7 +169,7 @@ def run(args: argparse.Namespace) -> dict:
         "status": "running",
         "phase": "CREATED",
         "requested_left_m": args.left_m,
-        "turn_ccw_deg": args.turn_ccw_deg,
+        "turn_cw_deg": args.turn_cw_deg,
         "door_before_m": 0.50,
         "door_forward_m": 1.20,
         "reports": [],
@@ -181,7 +181,7 @@ def run(args: argparse.Namespace) -> dict:
                 "--resume-door requires a BASE_REALIGNED or DOOR_RETURN_FAILED checkpoint"
             )
         completed = {item.get("stage") for item in previous.get("reports", [])}
-        if not {"LEFT_BY_MEASURED_OUTBOUND", "TURN_CCW_180"}.issubset(completed):
+        if not {"LEFT_BY_MEASURED_OUTBOUND", "TURN_CW_180"}.issubset(completed):
             raise RuntimeError("--resume-door checkpoint does not prove base realignment")
         state = previous
         state.pop("door_returncode", None)
@@ -205,13 +205,13 @@ def run(args: argparse.Namespace) -> dict:
             else:
                 left_report = {"skipped": True, "reason": "target was already centered"}
             state["reports"].append({"stage": "LEFT_BY_MEASURED_OUTBOUND", **left_report})
-            state["phase"] = "TURN_180_RUNNING"
+            state["phase"] = "TURN_CW_180_RUNNING"
             atomic_write(args.state_file, state)
             turn_timeout = max(
-                24.0, math.radians(args.turn_ccw_deg) / args.angular_speed_rps + 15.0
+                24.0, math.radians(args.turn_cw_deg) / args.angular_speed_rps + 15.0
             )
-            turn_report = node.rotate_ccw(math.radians(args.turn_ccw_deg), turn_timeout)
-            state["reports"].append({"stage": "TURN_CCW_180", **turn_report})
+            turn_report = node.rotate_ccw(-math.radians(args.turn_cw_deg), turn_timeout)
+            state["reports"].append({"stage": "TURN_CW_180", **turn_report})
             node.stop(30)
             state["phase"] = "BASE_REALIGNED"
             state["zero_command_latched"] = True
@@ -254,7 +254,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fresh-start", action="store_true")
     parser.add_argument("--resume-door", action="store_true")
     parser.add_argument("--left-m", type=float, required=True)
-    parser.add_argument("--turn-ccw-deg", type=float, default=180.0)
+    parser.add_argument("--turn-cw-deg", type=float, default=180.0)
     parser.add_argument("--linear-speed-mps", type=float, default=0.065)
     parser.add_argument("--angular-speed-rps", type=float, default=0.18)
     parser.add_argument("--door-config", type=Path, default=DEFAULT_CONFIG)
@@ -268,7 +268,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not 0.0 <= args.left_m <= 2.40:
         parser.error("left-m must be the measured search distance in [0.00, 2.40]")
-    if not 175.0 <= args.turn_ccw_deg <= 185.0:
+    if not 175.0 <= args.turn_cw_deg <= 185.0:
         parser.error("turn must remain within the bounded 180-degree return range")
     if args.fresh_start and args.resume_door:
         parser.error("--fresh-start and --resume-door are mutually exclusive")
@@ -283,7 +283,7 @@ def main() -> int:
             "motion_enabled": False,
             "sequence": [
                 f"left {args.left_m:.3f} m (measured outbound distance)",
-                f"CCW {args.turn_ccw_deg:.1f} deg",
+                f"CW {args.turn_cw_deg:.1f} deg",
                 "live door midpoint alignment",
                 "stop 0.50 m before door",
                 "forward 1.20 m",

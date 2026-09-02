@@ -60,7 +60,7 @@ class LetterDeliveryContracts(unittest.TestCase):
     def test_return_uses_measured_search_distance(self) -> None:
         command = " ".join(mission.return_argv(full_config(), self.plan, 1.2345, "run"))
         self.assertIn("--left-m 1.2345", command)
-        self.assertIn("--turn-ccw-deg 180.000", command)
+        self.assertIn("--turn-cw-deg 180.000", command)
 
     def test_structured_reports_are_required(self) -> None:
         search_report = {

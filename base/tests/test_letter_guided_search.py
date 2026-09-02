@@ -61,6 +61,15 @@ class LetterVisionContracts(unittest.TestCase):
         self.assertEqual({item.row for item in found if item.letter in {"A", "B"}}, {"near"})
         self.assertEqual({item.row for item in found if item.letter == "E"}, {"far"})
 
+    def test_letter_d_is_supported_when_configured(self) -> None:
+        image = np.full((720, 1280, 3), (55, 70, 85), np.uint8)
+        for letter, x, y in (("A", 150, 470), ("B", 560, 460), ("D", 930, 170)):
+            cv2.rectangle(image, (x, y), (x + 90, y + 130), (245, 245, 245), -1)
+            cv2.putText(image, letter, (x + 10, y + 100), cv2.FONT_HERSHEY_SIMPLEX,
+                        2.3, (70, 70, 70), 4, cv2.LINE_AA)
+        found = vision.LetterCardRecognizer("ABD", minimum_confidence=0.20).detect(image)
+        self.assertEqual({item.letter for item in found}, {"A", "B", "D"})
+
     def test_same_letter_cards_use_group_midpoint(self) -> None:
         tracker = search.TargetTracker("E", "far", stable_frames=3)
         observation = tracker.observe(

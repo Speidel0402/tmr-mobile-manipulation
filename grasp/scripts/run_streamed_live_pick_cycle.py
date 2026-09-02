@@ -51,6 +51,10 @@ HEAD_MIN_DESCENT_M = 0.220
 HEAD_MAX_DESCENT_M = 0.245
 MAX_RECOVERABLE_VISUAL_ERROR_PX = 11.0
 MIN_EXECUTABLE_FINE_STEP_M = 0.0025
+MAX_VISUAL_SEARCH_M = 0.38
+VISION_SETTLE_BEFORE_SAMPLE_S = 0.55
+VISION_STABLE_FRAMES = 5
+VISION_STABLE_RADIUS_PX = 8.0
 MAX_HIGH_GRASP_PLANE_RESIDUAL_M = 0.020
 REFERENCE_Q = np.asarray(
     [0.6965795194017754, 0.7171679017330287, 0.006319729771827597, 0.020180061680965224],
@@ -70,6 +74,14 @@ REFERENCE_JOINTS = np.asarray(
         0.8496646285057068,
         -3.05077862739563,
     ],
+    dtype=float,
+)
+# Empirical pixel-per-metre mapping from a completed bowl alignment at the
+# recorded top pose.  A fresh probe may refine it, but a circle-fit jump must
+# never be allowed to reverse the known image-x response to arm-x motion.
+CALIBRATED_VISUAL_JACOBIAN = np.asarray(
+    [[-773.8408883365554, -206.6096777663516],
+     [555.7475627583005, 1862.6534184570041]],
     dtype=float,
 )
 
@@ -131,11 +143,15 @@ def cup_right_once(bgr):
 
 def detect_cup_right(
     previous_stamp=None,
-    timeout=7.0,
+    timeout=15.0,
     expected_session_id=None,
     expected_point=None,
     maximum_tracking_error_px=80.0,
 ):
+    # A completed arm action can leave a short camera/fixture oscillation.
+    # Do not let those transient frames enter the unchanged rim detector or
+    # its Jacobian estimate; wait, then require consecutive stable results.
+    time.sleep(VISION_SETTLE_BEFORE_SAMPLE_S)
     deadline = time.monotonic() + timeout
     last_stamp = -math.inf if previous_stamp is None else float(previous_stamp)
     observations = []
@@ -162,21 +178,24 @@ def detect_cup_right(
                     time.sleep(0.025)
                     continue
             observations.append((point, stamp, detail))
-            observations = observations[-7:]
-            if len(observations) >= 3:
+            observations = observations[-VISION_STABLE_FRAMES:]
+            if len(observations) >= VISION_STABLE_FRAMES:
                 points = np.asarray([item[0] for item in observations], dtype=float)
                 center = np.median(points, axis=0)
-                keep = np.linalg.norm(points - center, axis=1) <= 4.0
-                if int(np.sum(keep)) >= 3:
-                    stable = points[keep]
-                    point = np.median(stable, axis=0)
+                deviations = np.linalg.norm(points - center, axis=1)
+                if float(np.max(deviations)) <= VISION_STABLE_RADIUS_PX:
+                    point = center
                     return {
                         "point": point,
                         "stamp": float(max(item[1] for item in observations)),
-                        "spread_px": float(np.max(np.linalg.norm(stable - point, axis=1))),
+                        "spread_px": float(np.max(deviations)),
                         "detail": observations[-1][2],
                         "camera_session_id": expected_session_id,
                     }
+                last_error = (
+                    f"rim still settling; five-frame spread "
+                    f"{float(np.max(deviations)):.1f}px"
+                )
             time.sleep(0.025)
         except Exception as exc:
             last_error = repr(exc)
@@ -383,12 +402,15 @@ def calibrate(arm, camera_session_id, preflight_stamp):
         emit("aligned_near", point_px=p0.tolist(), error_px=initial_error.tolist(), tolerance_px=initial_tolerance, reason="initial_within_detector_resolution")
         return {"point": p0, "error": initial_error, "iterations": 0, "mode": "initial_soft_accept"}
 
-    actual_x, base_x, _ = arm.move_xy([0.007, 0.0])
+    # When the target begins at the extreme right, probe inward so the first
+    # calibration motion cannot push its rim out of the image.
+    probe_x_sign = -1.0 if float(p0[0]) > 600.0 else 1.0
+    actual_x, base_x, _ = arm.move_xy([0.007 * probe_x_sign, 0.0])
     obs_x = detect_cup_right(previous_stamp=stamp, expected_session_id=camera_session_id)
     px, stamp = obs_x["point"], obs_x["stamp"]
     emit("probe", axis="x", actual_m=actual_x.tolist(), point_px=px.tolist())
 
-    actual_y, base_y, _ = arm.move_xy([-0.007, 0.007])
+    actual_y, base_y, _ = arm.move_xy([-0.007 * probe_x_sign, 0.007])
     obs_y = detect_cup_right(previous_stamp=stamp, expected_session_id=camera_session_id)
     py, stamp = obs_y["point"], obs_y["stamp"]
     emit("probe", axis="y", actual_m=actual_y.tolist(), point_px=py.tolist())
@@ -400,7 +422,17 @@ def calibrate(arm, camera_session_id, preflight_stamp):
     jacobian = pixels @ np.linalg.inv(displacement)
     singular = np.linalg.svd(jacobian, compute_uv=False)
     condition = float(singular[0] / max(singular[-1], 1e-9))
-    if singular[-1] < 60.0 or condition > 30.0:
+    if jacobian[0, 0] >= -100.0:
+        emit(
+            "jacobian_fallback",
+            reason="probe_direction_inconsistent",
+            measured=jacobian.tolist(),
+            replacement=CALIBRATED_VISUAL_JACOBIAN.tolist(),
+        )
+        jacobian = CALIBRATED_VISUAL_JACOBIAN.copy()
+        singular = np.linalg.svd(jacobian, compute_uv=False)
+        condition = float(singular[0] / singular[-1])
+    elif singular[-1] < 60.0 or condition > 30.0:
         raise RuntimeError(f"visual Jacobian unreliable {singular.tolist()} condition={condition:.3f}")
     emit("jacobian", matrix=jacobian.tolist(), condition=condition)
     probe_jacobian = jacobian.copy()
@@ -460,8 +492,8 @@ def calibrate(arm, camera_session_id, preflight_stamp):
                 iteration=iteration,
                 minimum_executable_m=MIN_EXECUTABLE_FINE_STEP_M,
             )
-        if float(np.linalg.norm(current_base + step - base_origin)) > 0.24:
-            raise RuntimeError("visual search exceeded 0.24m")
+        if float(np.linalg.norm(current_base + step - base_origin)) > MAX_VISUAL_SEARCH_M:
+            raise RuntimeError(f"visual search exceeded {MAX_VISUAL_SEARCH_M:.2f}m")
         old_norm = float(np.linalg.norm(error))
         actual, new_base, end_pose = arm.move_xy(step)
         predicted_point = current_point + jacobian @ actual

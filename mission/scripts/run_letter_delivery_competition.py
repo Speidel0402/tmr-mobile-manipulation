@@ -228,13 +228,18 @@ def letter_place_argv(
     )
 
 
-def return_argv(config: FullConfig, plan: DeliveryPlan, right_m: float, run_id: str) -> list[str]:
+def return_argv(
+    config: FullConfig,
+    plan: DeliveryPlan,
+    right_m: float,
+    run_id: str,
+) -> list[str]:
     runner = shlex.quote(f"{config.base_root}/scripts/15_run_return_from_letter.sh")
     arguments = [
         "--execute",
         "--fresh-start",
         "--left-m", f"{right_m:.4f}",
-        "--turn-ccw-deg", f"{plan.return_turn_deg:.3f}",
+        "--turn-cw-deg", f"{plan.return_turn_deg:.3f}",
         "--disable-collision-guard",
         "--state-file", f"/tmp/tmr_letter_return_{run_id}.json",
     ]
@@ -291,22 +296,53 @@ def extract_return_report(text: str) -> dict | None:
     return match
 
 
-def strategy(config: FullConfig, plan: DeliveryPlan, checkpoint: Path) -> dict:
+def strategy(
+    config: FullConfig,
+    plan: DeliveryPlan,
+    checkpoint: Path,
+    *,
+    stop_after_place: bool = False,
+    resume_from_object_held: bool = False,
+    resume_from_search_start: bool = False,
+) -> dict:
+    phases = []
+    if resume_from_search_start:
+        phases.append(
+            "resume: post-grasp retreat/turn/backward already complete -> preserve pose and begin B search"
+        )
+    elif resume_from_object_held:
+        phases.append(
+            "resume: object already held at standard height -> preserve both arms and skip initialization/outbound/pick"
+        )
+    else:
+        phases.extend(
+            [
+                "startup: reset both arm joints -> restore spine to 0.70 m -> keep right inward parking and left calibrated pick-top hold",
+                "outbound -> door midpoint -> 0.50 m before -> forward 1.20 m",
+                "visual cup pick -> stable object hold",
+            ]
+        )
+    phases.extend(
+        [
+        "retreat 1.70 m -> CCW 180 deg -> backward 0.25 m",
+        f"right letter search <= {plan.maximum_right_m:.2f} m -> temporal center lock",
+        "near: direct vertical place; far: fixed 0.16 m extension -> vertical place -> retract",
+        ]
+    )
+    if not stop_after_place:
+        phases.extend(
+            [
+                "left by measured right distance -> CW 180 deg",
+                "verify both door edges/midpoint -> 0.50 m before -> forward 1.20 m -> final zero hold",
+            ]
+        )
     return {
         "status": "dry_run",
         "motion_enabled": False,
         "target_letter": plan.target_letter,
         "requested_row": plan.requested_row,
-        "phases": [
-            "startup: reset both arm joints -> restore spine to 0.70 m -> keep right inward parking and left calibrated pick-top hold",
-            "outbound -> door midpoint -> 0.50 m before -> forward 1.20 m",
-            "visual cup pick -> stable object hold",
-            "retreat 1.70 m -> CCW 180 deg -> backward 0.25 m",
-            f"right letter search <= {plan.maximum_right_m:.2f} m -> temporal center lock",
-            "near: direct vertical place; far: fixed 0.16 m extension -> vertical place -> retract",
-            "left by measured right distance -> CCW 180 deg",
-            "door midpoint -> 0.50 m before -> forward 1.20 m -> final zero hold",
-        ],
+        "phases": phases,
+        "stop_after_place": bool(stop_after_place),
         "checkpoint": str(checkpoint),
         "base_host": config.base_host,
     }
@@ -336,15 +372,34 @@ def run(args: argparse.Namespace) -> int:
         transition_settle_s=args.transition_settle_s,
     )
     if not args.execute:
-        print(json.dumps(strategy(config, plan, args.checkpoint), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                strategy(
+                    config,
+                    plan,
+                    args.checkpoint,
+                    stop_after_place=args.stop_after_place,
+                    resume_from_object_held=args.resume_from_object_held_confirmed,
+                    resume_from_search_start=args.resume_from_search_start_confirmed,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
     previous = load_checkpoint(args.checkpoint)
-    resume_modes = int(args.resume_from_pickup_confirmed) + int(
-        args.resume_from_object_held_confirmed
+    resume_modes = (
+        int(args.resume_from_pickup_confirmed)
+        + int(args.resume_from_object_held_confirmed)
+        + int(args.resume_from_search_start_confirmed)
     )
     if resume_modes > 1 or (resume_modes and args.fresh_start_confirmed):
         raise MissionError("choose exactly one marked-start or resume mode")
-    if args.resume_from_object_held_confirmed:
+    if args.resume_from_search_start_confirmed:
+        # The flag is the operator's explicit assertion that the three-stage
+        # post-grasp route completed and the base is stopped at search start.
+        pass
+    elif args.resume_from_object_held_confirmed:
         # This flag is the operator's explicit assertion that an object is
         # already securely held at the standard transport height.  Do not
         # initialize either arm and do not replay the pick.
@@ -366,6 +421,7 @@ def run(args: argparse.Namespace) -> int:
             plan,
             resume_from_pickup=args.resume_from_pickup_confirmed,
             resume_from_object_held=args.resume_from_object_held_confirmed,
+            resume_from_search_start=args.resume_from_search_start_confirmed,
         )
 
 
@@ -376,13 +432,40 @@ def run_locked(
     *,
     resume_from_pickup: bool = False,
     resume_from_object_held: bool = False,
+    resume_from_search_start: bool = False,
 ) -> int:
     run_id = uuid.uuid4().hex[:12]
     logs = args.log_dir / run_id
     phase = Phase.CREATED
     save(args.checkpoint, run_id, phase, plan)
     try:
-        if resume_from_object_held:
+        if resume_from_search_start:
+            phase = Phase.PREPARING_LABEL_SEARCH
+            save(
+                args.checkpoint,
+                run_id,
+                phase,
+                plan,
+                object_held_confirmed_by_operator=True,
+                post_grasp_route_confirmed=True,
+                skipped_initialization=True,
+                skipped_outbound=True,
+                skipped_pick=True,
+                skipped_prepare_search=True,
+            )
+            emit(
+                "resume",
+                run_id=run_id,
+                from_phase=Phase.LABEL_SEARCH_RUNNING.value,
+                skipped_phases=[
+                    Phase.INITIALIZING_DUAL_ARMS.value,
+                    Phase.INITIALIZING_SPINE.value,
+                    Phase.OUTBOUND_BASE_RUNNING.value,
+                    Phase.PICK_RUNNING.value,
+                    Phase.PREPARING_LABEL_SEARCH.value,
+                ],
+            )
+        elif resume_from_object_held:
             phase = Phase.OBJECT_HELD
             save(
                 args.checkpoint,
@@ -465,15 +548,16 @@ def run_locked(
             phase = Phase.OBJECT_HELD
             save(args.checkpoint, run_id, phase, plan, pick_event=pick_event)
 
-        phase = Phase.PREPARING_LABEL_SEARCH
-        save(args.checkpoint, run_id, phase, plan)
-        result = run_streamed_command(
-            "prepare-search", prepare_search_argv(config, run_id),
-            args.base_phase_timeout_s, logs / "prepare_search.log"
-        )
-        report = extract_last_json_object(result.output)
-        if result.returncode != 0 or not preparation_report_ok(report):
-            raise MissionError("retreat/turn/backward prefix did not complete exactly three stages")
+        if not resume_from_search_start:
+            phase = Phase.PREPARING_LABEL_SEARCH
+            save(args.checkpoint, run_id, phase, plan)
+            result = run_streamed_command(
+                "prepare-search", prepare_search_argv(config, run_id),
+                args.base_phase_timeout_s, logs / "prepare_search.log"
+            )
+            report = extract_last_json_object(result.output)
+            if result.returncode != 0 or not preparation_report_ok(report):
+                raise MissionError("retreat/turn/backward prefix did not complete exactly three stages")
 
         phase = Phase.LABEL_SEARCH_RUNNING
         save(args.checkpoint, run_id, phase, plan)
@@ -508,6 +592,30 @@ def run_locked(
             selected_row=row, measured_right_m=right_m, place_report=place_report,
         )
 
+        if args.stop_after_place:
+            phase = Phase.COMPLETE
+            save(
+                args.checkpoint,
+                run_id,
+                phase,
+                plan,
+                selected_row=row,
+                measured_right_m=right_m,
+                place_report=place_report,
+                returned_to_table=False,
+                stopped_after_place=True,
+            )
+            emit(
+                "complete",
+                run_id=run_id,
+                target_letter=plan.target_letter,
+                selected_row=row,
+                measured_right_m=right_m,
+                returned_to_table=False,
+                stopped_after_place=True,
+            )
+            return 0
+
         phase = Phase.RETURN_RUNNING
         save(args.checkpoint, run_id, phase, plan, measured_right_m=right_m)
         result = run_streamed_command(
@@ -516,7 +624,7 @@ def run_locked(
         )
         return_report = extract_return_report(result.output)
         if result.returncode != 0 or not return_report_ok(return_report):
-            raise MissionError("measured-left/180/door return did not prove final zero hold")
+            raise MissionError("measured-left/CW-180/door return did not prove final zero hold")
         phase = Phase.COMPLETE
         save(
             args.checkpoint, run_id, phase, plan,
@@ -551,6 +659,16 @@ def parse_args() -> argparse.Namespace:
         "--resume-from-object-held-confirmed",
         action="store_true",
         help="object is already held at transport height; skip init, outbound, and pick",
+    )
+    parser.add_argument(
+        "--resume-from-search-start-confirmed",
+        action="store_true",
+        help="object is held and the post-grasp retreat/turn/backward route is already complete",
+    )
+    parser.add_argument(
+        "--stop-after-place",
+        action="store_true",
+        help="stop with zero base velocity after release instead of running the return route",
     )
     parser.add_argument("--target-letter")
     parser.add_argument("--row", choices=("auto", "near", "far"))

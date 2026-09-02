@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Sequentially restore both FR3 arms to the unified pick-start posture.
+"""Reset both grippers and restore both FR3 arms to the pick-start posture.
 
 The left target is the calibrated successful pick-top pose.  The right target
-is a raised, retracted parking pose. The right arm parks before the left arm
-enters its pick corridor. No gripper command is sent by this script.
+is a raised, retracted parking pose. Grippers are reset before arm motion; the
+right arm then parks before the left arm enters its pick corridor.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ import time
 import numpy as np
 import rclpy
 import yaml
+from action_msgs.msg import GoalStatus
+from control_msgs.action import GripperCommand
 from controller_manager_msgs.srv import SetHardwareComponentState, SwitchController
 from franka_msgs.action import PTPMotion
 from franka_msgs.msg import FrankaRobotState
@@ -264,6 +266,73 @@ class ArmInitializer(Node):
         }
 
 
+class GripperInitializer(Node):
+    def __init__(
+        self,
+        arm: str,
+        target: float,
+        max_effort: float,
+        tolerance: float,
+    ) -> None:
+        super().__init__(f"{arm}_gripper_initializer")
+        self.arm_name = arm
+        self.target = float(target)
+        self.max_effort = float(max_effort)
+        self.tolerance = float(tolerance)
+        self.action = ActionClient(
+            self,
+            GripperCommand,
+            f"/{arm}/gripper/robotiq_gripper_controller/gripper_cmd",
+        )
+
+    def reset(self) -> dict:
+        if not self.action.wait_for_server(timeout_sec=8.0):
+            raise RuntimeError(f"{self.arm_name} gripper action unavailable")
+        last_error = "no result"
+        for attempt in range(1, 3):
+            goal = GripperCommand.Goal()
+            goal.command.position = self.target
+            goal.command.max_effort = self.max_effort
+            future = self.action.send_goal_async(goal)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+            handle = future.result()
+            if handle is None or not handle.accepted:
+                last_error = "goal rejected"
+                continue
+            result_future = handle.get_result_async()
+            rclpy.spin_until_future_complete(self, result_future, timeout_sec=35.0)
+            wrapped = result_future.result()
+            if wrapped is None:
+                cancel = handle.cancel_goal_async()
+                rclpy.spin_until_future_complete(self, cancel, timeout_sec=5.0)
+                last_error = "goal timeout"
+                continue
+            measured = float(wrapped.result.position)
+            reached = bool(wrapped.result.reached_goal)
+            position_error = measured - self.target
+            if (
+                int(wrapped.status) == GoalStatus.STATUS_SUCCEEDED
+                and reached
+                and abs(position_error) <= self.tolerance
+            ):
+                return {
+                    "arm": self.arm_name,
+                    "attempt": attempt,
+                    "target_position": self.target,
+                    "measured_position": measured,
+                    "position_error": position_error,
+                    "reached_goal": True,
+                    "stable_reset": True,
+                }
+            last_error = (
+                f"status={int(wrapped.status)} reached={reached} "
+                f"position={measured:.6f}"
+            )
+        raise RuntimeError(
+            f"{self.arm_name} gripper reset was not verified: {last_error}"
+        )
+
+
 def load_targets(path: Path) -> dict[str, list[float]]:
     value = yaml.safe_load(path.read_text(encoding="utf-8"))
     targets = {}
@@ -283,6 +352,24 @@ def load_initialization_order(path: Path) -> tuple[str, str]:
     return order
 
 
+def load_gripper_reset(
+    path: Path,
+) -> tuple[tuple[str, str], dict[str, float], float, float]:
+    value = yaml.safe_load(path.read_text(encoding="utf-8"))["grippers"]
+    order = tuple(str(item) for item in value.get("reset_order", ("right", "left")))
+    if len(order) != 2 or set(order) != {"left", "right"}:
+        raise RuntimeError("invalid gripper reset_order")
+    targets = {arm: float(value[arm]["position"]) for arm in ("left", "right")}
+    if not all(0.0 <= target <= 0.8 for target in targets.values()):
+        raise RuntimeError("gripper reset target outside [0.0, 0.8]")
+    return (
+        order,
+        targets,
+        float(value.get("max_effort", 1.0)),
+        float(value.get("position_tolerance", 0.05)),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
@@ -295,11 +382,16 @@ def main() -> int:
     args = parser.parse_args()
     targets = load_targets(args.config)
     order = load_initialization_order(args.config)
+    gripper_order, gripper_targets, gripper_effort, gripper_tolerance = (
+        load_gripper_reset(args.config)
+    )
     summary = {
         "status": "dry_run",
         "order": list(order),
         "targets": targets,
-        "gripper_commanded": False,
+        "gripper_order": list(gripper_order),
+        "gripper_targets": gripper_targets,
+        "gripper_commanded": True,
     }
     if not args.execute:
         print(json.dumps(summary, indent=2), flush=True)
@@ -307,7 +399,26 @@ def main() -> int:
 
     rclpy.init()
     reports = []
+    gripper_reports = []
     try:
+        for arm_name in gripper_order:
+            emit(
+                "gripper_reset_start",
+                arm=arm_name,
+                target=gripper_targets[arm_name],
+            )
+            node = GripperInitializer(
+                arm_name,
+                gripper_targets[arm_name],
+                gripper_effort,
+                gripper_tolerance,
+            )
+            try:
+                report = node.reset()
+                gripper_reports.append(report)
+                emit("gripper_reset_complete", **report)
+            finally:
+                node.destroy_node()
         for arm_name in order:
             emit("arm_start", arm=arm_name)
             node = ArmInitializer(arm_name, targets[arm_name], args.maximum_velocity)
@@ -322,12 +433,29 @@ def main() -> int:
             "order": list(order),
             "reports": reports,
             "both_stable_hold": all(item["stable_hold"] for item in reports),
-            "gripper_commanded": False,
+            "gripper_order": list(gripper_order),
+            "gripper_reports": gripper_reports,
+            "both_grippers_reset": (
+                len(gripper_reports) == 2
+                and all(item["stable_reset"] for item in gripper_reports)
+            ),
+            "gripper_commanded": True,
         }
         print(json.dumps(result, indent=2), flush=True)
         return 0
     except BaseException as exc:
-        print(json.dumps({"status": "failed", "error": repr(exc), "reports": reports}, indent=2), flush=True)
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error": repr(exc),
+                    "reports": reports,
+                    "gripper_reports": gripper_reports,
+                },
+                indent=2,
+            ),
+            flush=True,
+        )
         return 1
     finally:
         rclpy.shutdown()

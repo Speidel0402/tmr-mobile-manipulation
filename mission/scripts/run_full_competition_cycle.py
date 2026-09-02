@@ -189,6 +189,20 @@ def init_report_is_stable(report: dict | None) -> bool:
     arm_reports = report.get("reports", [])
     if report.get("order") != ["right", "left"] or len(arm_reports) != 2:
         return False
+    gripper_reports = report.get("gripper_reports", [])
+    if report.get("gripper_order") != ["right", "left"] or len(gripper_reports) != 2:
+        return False
+    grippers = {item.get("arm"): item for item in gripper_reports}
+    right_gripper = grippers.get("right", {})
+    left_gripper = grippers.get("left", {})
+    grippers_at_targets = bool(
+        right_gripper.get("stable_reset") is True
+        and left_gripper.get("stable_reset") is True
+        and abs(float(right_gripper.get("target_position", -1.0)) - 0.8) <= 1e-9
+        and abs(float(right_gripper.get("measured_position", -1.0)) - 0.8) <= 0.05
+        and abs(float(left_gripper.get("target_position", -1.0)) - 0.0) <= 1e-9
+        and abs(float(left_gripper.get("measured_position", -1.0)) - 0.0) <= 0.05
+    )
     right, left = arm_reports
     right_target = right.get("target_joint_positions_rad", [])
     right_measured = right.get("measured_joint_positions_rad", [])
@@ -210,7 +224,9 @@ def init_report_is_stable(report: dict | None) -> bool:
     )
     return bool(
         report.get("both_stable_hold") is True
-        and report.get("gripper_commanded") is False
+        and report.get("gripper_commanded") is True
+        and report.get("both_grippers_reset") is True
+        and grippers_at_targets
         and right.get("arm") == "right"
         and right.get("moved") is True
         and right.get("stable_hold") is True

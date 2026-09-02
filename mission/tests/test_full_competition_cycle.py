@@ -68,7 +68,19 @@ class FullCompetitionContracts(unittest.TestCase):
             "status": "success",
             "order": ["right", "left"],
             "both_stable_hold": True,
-            "gripper_commanded": False,
+            "gripper_commanded": True,
+            "gripper_order": ["right", "left"],
+            "both_grippers_reset": True,
+            "gripper_reports": [
+                {
+                    "arm": "right", "target_position": 0.8,
+                    "measured_position": 0.8, "stable_reset": True,
+                },
+                {
+                    "arm": "left", "target_position": 0.0,
+                    "measured_position": 0.0, "stable_reset": True,
+                },
+            ],
             "reports": [
                 {
                     "arm": "right",
@@ -97,7 +109,19 @@ class FullCompetitionContracts(unittest.TestCase):
             "status": "success",
             "order": ["right", "left"],
             "both_stable_hold": True,
-            "gripper_commanded": False,
+            "gripper_commanded": True,
+            "gripper_order": ["right", "left"],
+            "both_grippers_reset": True,
+            "gripper_reports": [
+                {
+                    "arm": "right", "target_position": 0.8,
+                    "measured_position": 0.8, "stable_reset": True,
+                },
+                {
+                    "arm": "left", "target_position": 0.0,
+                    "measured_position": 0.0, "stable_reset": True,
+                },
+            ],
             "reports": [
                 {
                     "arm": "right",

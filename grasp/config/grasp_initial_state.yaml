@@ -1,15 +1,24 @@
 # Left is the successful calibrated pick-top pose. Right is a raised, retracted
 # parking pose that clears the left pick/restore corridor. Updated 2026-09-02.
 # Semantic name: 夹取初始状态 (grasp initial state)
-# This file records arm joint positions only; it does not command either gripper.
-# Restore motions must use the matching arm namespace, low velocity, and normal
-# controller/error checks before and after execution.
+# Restore motions use the matching arm namespace, low velocity, and normal
+# controller/error checks before and after execution. Grippers are reset first:
+# right closed for a compact parked envelope, left open and ready to grasp.
 
 state_name: grasp_initial_state
 position_unit: rad
 initialization_order:
   - right
   - left
+
+grippers:
+  reset_order: [right, left]
+  max_effort: 1.0
+  position_tolerance: 0.05
+  right:
+    position: 0.8
+  left:
+    position: 0.0
 
 left:
   namespace: /left

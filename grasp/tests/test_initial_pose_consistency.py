@@ -29,15 +29,20 @@ class InitialPoseConsistencyTests(unittest.TestCase):
         config = yaml.safe_load((ROOT / "config" / "grasp_initial_state.yaml").read_text(encoding="utf-8"))
         self.assertEqual(config["left"]["positions"], recorded_pick_joints())
 
-    def test_initializer_reads_the_shared_config_and_never_commands_grippers(self) -> None:
+    def test_initializer_reads_shared_config_and_resets_both_grippers(self) -> None:
         source = (ROOT / "scripts" / "initialize_dual_arm_pick_pose.py").read_text(encoding="utf-8")
         self.assertIn('"config" / "grasp_initial_state.yaml"', source)
-        self.assertIn('"gripper_commanded": False', source)
+        self.assertIn('"gripper_commanded": True', source)
+        self.assertIn("GripperCommand", source)
+        self.assertIn('"both_grippers_reset"', source)
         self.assertIn("JOINT_HOLD_TOLERANCE_RAD = 0.006", source)
         self.assertIn('"reset_required"', source)
         self.assertNotIn('"already_at_target"', source)
         self.assertIn("self.publish_hold_target(samples=12)", source)
-        self.assertNotIn("GripperCommand", source)
+        config = yaml.safe_load((ROOT / "config" / "grasp_initial_state.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(config["grippers"]["reset_order"], ["right", "left"])
+        self.assertEqual(config["grippers"]["right"]["position"], 0.8)
+        self.assertEqual(config["grippers"]["left"]["position"], 0.0)
 
     def test_right_arm_parks_before_left_arm_enters_pick_corridor(self) -> None:
         config = yaml.safe_load((ROOT / "config" / "grasp_initial_state.yaml").read_text(encoding="utf-8"))

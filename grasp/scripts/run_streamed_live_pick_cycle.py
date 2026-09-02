@@ -590,12 +590,38 @@ def recover_best_visual_pose(arm, best, stamp, camera_session_id, iterations, re
 
 
 def calibrate(arm, camera_session_id, preflight_stamp):
+    search_origin_q = list(arm.q)
+    first = None
+    last_error = None
+    # The return-to-table route can leave a large bowl clipped by the upper
+    # image boundary even though the base endpoint is acceptable.  Reacquire
+    # with two small, top-height camera shifts instead of moving the base or
+    # blindly descending from a missing detection.
+    for search_index, delta_y in enumerate((0.0, 0.030, 0.030)):
+        if delta_y:
+            actual, _, pose = arm.move_xy([0.0, delta_y])
+            emit(
+                "initial_visual_search_step",
+                index=search_index,
+                requested_y_m=delta_y,
+                actual_xy_m=actual.tolist(),
+                z=float(pose.position.z),
+            )
+        try:
+            first = detect_cup_right(
+                previous_stamp=preflight_stamp,
+                timeout=4.0,
+                expected_session_id=camera_session_id,
+            )
+            break
+        except RuntimeError as exc:
+            last_error = exc
+            emit("initial_visual_search_miss", index=search_index, detail=str(exc))
+    if first is None:
+        arm.move_ptp(search_origin_q)
+        raise RuntimeError("target absent after bounded top-height search: " + str(last_error))
     initial_pose = arm.fk(list(arm.q))
     base_origin = np.asarray([initial_pose.position.x, initial_pose.position.y], dtype=float)
-    first = detect_cup_right(
-        previous_stamp=preflight_stamp,
-        expected_session_id=camera_session_id,
-    )
     p0, stamp = first["point"], first["stamp"]
     reference_radius_px = first["rim_radius_px"]
     emit(

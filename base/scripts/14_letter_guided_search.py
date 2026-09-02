@@ -195,6 +195,7 @@ class AdaptiveCenterPolicy:
         search_speed_mps: float,
         refine_speed_mps: float,
         minimum_gain_confidence: float = 0.55,
+        center_tolerance_norm: float = 0.055,
     ) -> None:
         self.search_speed_mps = float(search_speed_mps)
         self.refine_speed_mps = float(refine_speed_mps)
@@ -202,6 +203,7 @@ class AdaptiveCenterPolicy:
         self.image_gain_per_m: float | None = None
         self.last_direction = 1.0
         self.minimum_gain_confidence = float(minimum_gain_confidence)
+        self.center_tolerance_norm = float(center_tolerance_norm)
 
     def reliable(self, observation: TargetObservation | None) -> bool:
         return (
@@ -229,7 +231,7 @@ class AdaptiveCenterPolicy:
         else:
             self.gain_anchor = observation
         error = observation.center_x_norm - 0.5
-        if abs(error) <= 0.055:
+        if abs(error) <= self.center_tolerance_norm:
             return 0.0
         if self.image_gain_per_m is None or abs(self.image_gain_per_m) < 0.04:
             self.last_direction = 1.0
@@ -362,7 +364,11 @@ def run_ros(args: argparse.Namespace) -> dict:
         acquire_tolerance_norm=args.center_acquire_norm,
         single_frame_hold_s=args.center_hold_s,
     )
-    policy = AdaptiveCenterPolicy(args.search_speed_mps, args.refine_speed_mps)
+    policy = AdaptiveCenterPolicy(
+        args.search_speed_mps,
+        args.refine_speed_mps,
+        center_tolerance_norm=args.center_tolerance_norm,
+    )
     recognizer = LetterCardRecognizer(
         alphabet=args.alphabet,
         minimum_confidence=args.minimum_confidence,

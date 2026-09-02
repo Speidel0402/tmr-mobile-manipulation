@@ -41,6 +41,8 @@ class Streams(Node):
         self.main_url = main_url
         self.main_period_s = main_period_s
         self.main_source_marker = None
+        self.main_fetch_attempts = 0
+        self.main_error = None
         for name, topic in WRIST_TOPICS.items():
             self.create_subscription(
                 Image,
@@ -64,6 +66,7 @@ class Streams(Node):
         # context.  A DDS restart must not terminate the head-camera bridge.
         while True:
             started = time.monotonic()
+            self.main_fetch_attempts += 1
             try:
                 with urllib.request.urlopen(self.main_url, timeout=1.0) as response:
                     source_marker = response.headers.get("Last-Modified")
@@ -80,8 +83,17 @@ class Streams(Node):
                         self.updated_monotonic["main"] = time.monotonic()
                         self.sequences["main"] += 1
                         self.main_source_marker = source_marker
-            except Exception:
-                pass
+                        self.main_error = None
+                elif not source_marker:
+                    self.main_error = "head HTTP source omitted Last-Modified"
+                elif not (
+                    16 <= len(payload) <= 8_000_000
+                    and payload.startswith(b"\xff\xd8")
+                    and payload.endswith(b"\xff\xd9")
+                ):
+                    self.main_error = f"invalid head JPEG ({len(payload)} bytes)"
+            except Exception as exc:
+                self.main_error = repr(exc)
             remaining = self.main_period_s - (time.monotonic() - started)
             if remaining > 0:
                 time.sleep(remaining)
@@ -140,12 +152,22 @@ setInterval(monitor,500); monitor();
                     for name, updated in self.streams.updated_monotonic.items()
                 }
                 sequences = dict(self.streams.sequences)
+                main_diagnostics = {
+                    "fetch_attempts": self.streams.main_fetch_attempts,
+                    "source_marker": self.streams.main_source_marker,
+                    "error": self.streams.main_error,
+                }
             healthy = {
                 name: age is not None and age <= MAX_FRAME_AGE_S[name]
                 for name, age in ages.items()
             }
             body = json.dumps(
-                {"frame_age_s": ages, "sequence": sequences, "healthy": healthy},
+                {
+                    "frame_age_s": ages,
+                    "sequence": sequences,
+                    "healthy": healthy,
+                    "main_source": main_diagnostics,
+                },
                 separators=(",", ":"),
             ).encode()
             self.send_response(200)

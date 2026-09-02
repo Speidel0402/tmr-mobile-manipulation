@@ -919,7 +919,7 @@ class GapApproachNode(Node):
         dt = clamp(now - self._command_at, 0.02, 0.10)
         old_vx, old_vy, old_wz = self._command
         linear_step = 0.16 * dt
-        angular_step = 0.45 * dt
+        angular_step = 0.28 * dt
         command = (
             old_vx + clamp(vx - old_vx, -linear_step, linear_step),
             old_vy + clamp(vy - old_vy, -linear_step, linear_step),

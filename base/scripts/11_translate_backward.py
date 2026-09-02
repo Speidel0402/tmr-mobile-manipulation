@@ -96,7 +96,7 @@ class BackwardController(Node):
                 now = time.monotonic()
                 dt = clamp(now - last_tick, 0.02, 0.10)
                 last_tick = now
-                for i, (target, accel) in enumerate(zip(desired, (0.15, 0.15, 0.4))):
+                for i, (target, accel) in enumerate(zip(desired, (0.15, 0.15, 0.28))):
                     step = accel * dt
                     self.command[i] += clamp(target - self.command[i], -step, step)
                 self.publish(*self.command)

@@ -15,6 +15,7 @@ import time
 
 import numpy as np
 import rclpy
+from action_msgs.msg import GoalStatus
 from controller_manager_msgs.srv import SetHardwareComponentState, SwitchController
 from geometry_msgs.msg import Pose
 from lifecycle_msgs.msg import State
@@ -23,7 +24,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 
-from franka_msgs.action import PTPMotion
+from franka_msgs.action import ErrorRecovery, PTPMotion
 from franka_msgs.msg import FrankaRobotState
 from moveit_msgs.srv import GetCartesianPath, GetPositionFK
 
@@ -65,6 +66,9 @@ class ServoNode(Node):
             SetHardwareComponentState,
             "/left/controller_manager/set_hardware_component_state",
         )
+        self.error_recovery = ActionClient(
+            self, ErrorRecovery, "/left/action_server/error_recovery"
+        )
         self.arm = ActionClient(self, PTPMotion, "/left/action_server/ptp_motion")
 
     def _on_joints(self, message):
@@ -83,6 +87,33 @@ class ServoNode(Node):
         request.target_state.label = label
         return self.call(self.hardware_client, request, timeout=12.0)
 
+    def _active_error_names(self):
+        if self.robot_state is None:
+            return []
+        errors = self.robot_state.current_errors
+        return [
+            name
+            for name in errors.get_fields_and_field_types()
+            if bool(getattr(errors, name))
+        ]
+
+    def _recover_robot_error(self):
+        """Run Franka error recovery before hardware/controller activation."""
+        if not self.error_recovery.wait_for_server(timeout_sec=3.0):
+            raise RuntimeError("Franka error recovery action unavailable")
+        future = self.error_recovery.send_goal_async(ErrorRecovery.Goal())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        handle = future.result() if future.done() else None
+        if handle is None or not handle.accepted:
+            raise RuntimeError("Franka error recovery goal rejected")
+        result_future = handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=12.0)
+        wrapped = result_future.result() if result_future.done() else None
+        if wrapped is None or wrapped.status != GoalStatus.STATUS_SUCCEEDED:
+            status = None if wrapped is None else int(wrapped.status)
+            raise RuntimeError(f"Franka error recovery failed (status={status})")
+        return True
+
     def ensure_runtime_ready(self):
         """Recover the left-arm lifecycle after a PTP controller hand-off."""
         if not self.hardware_client.wait_for_service(timeout_sec=6.0):
@@ -96,7 +127,20 @@ class ServoNode(Node):
         live_deadline = time.monotonic() + 1.0
         while (self.q is None or self.robot_state is None) and time.monotonic() < live_deadline:
             rclpy.spin_once(self, timeout_sec=0.05)
-        if self.q is None or self.robot_state is None:
+        state_was_live = self.q is not None and self.robot_state is not None
+        recovered = False
+        if state_was_live:
+            active_errors = self._active_error_names()
+            if active_errors:
+                # A single transition sample is harmless; a persistent FCI
+                # error must be cleared before lifecycle activation.
+                time.sleep(0.35)
+                rclpy.spin_once(self, timeout_sec=0.05)
+                active_errors = self._active_error_names()
+                if active_errors:
+                    recovered = self._recover_robot_error()
+
+        if not state_was_live or recovered:
             response = self._set_hardware_state(State.PRIMARY_STATE_ACTIVE, "active")
             if response.state.id != State.PRIMARY_STATE_ACTIVE:
                 # The first ACTIVE request from UNCONFIGURED commonly performs
@@ -107,7 +151,9 @@ class ServoNode(Node):
                 )
             if response.state.id != State.PRIMARY_STATE_ACTIVE:
                 raise RuntimeError(
-                    f"left hardware activation failed (state={response.state.id})"
+                    "left hardware activation failed "
+                    f"(state={response.state.id}); restart the arm controller "
+                    "process if this followed a Franka NetworkException"
                 )
 
         # BEST_EFFORT makes this idempotent: a controller that is already
@@ -140,6 +186,7 @@ class ServoNode(Node):
             rclpy.spin_once(self, timeout_sec=0.05)
         if self.q is None or self.robot_state is None:
             raise RuntimeError("robot state unavailable after lifecycle recovery")
+        self.gate()
 
     def publish_hold_target(self, samples=1):
         if self.hold_target is None:
@@ -239,12 +286,7 @@ class ServoNode(Node):
     def gate(self):
         if self.robot_state is None:
             raise RuntimeError("robot state lost")
-        fields = self.robot_state.current_errors.get_fields_and_field_types()
-        active = [
-            key
-            for key in fields
-            if bool(getattr(self.robot_state.current_errors, key))
-        ]
+        active = self._active_error_names()
         if not active:
             return
 
@@ -257,8 +299,7 @@ class ServoNode(Node):
             rclpy.spin_once(self, timeout_sec=0.04)
             if self.robot_state is None:
                 continue
-            current = self.robot_state.current_errors
-            active = [key for key in fields if bool(getattr(current, key))]
+            active = self._active_error_names()
             if not active:
                 return
         raise RuntimeError("persistent Franka error: " + ",".join(active))

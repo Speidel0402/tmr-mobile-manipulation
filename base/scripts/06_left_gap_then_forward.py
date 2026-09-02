@@ -117,7 +117,7 @@ class Controller(Node):
                 now = time.monotonic()
                 dt = clamp(now - last_tick, 0.02, 0.10)
                 last_tick = now
-                for i, accel in enumerate((0.22, 0.22, 0.40)):
+                for i, accel in enumerate((0.22, 0.22, 0.28)):
                     command[i] += clamp(desired[i] - command[i], -accel * dt, accel * dt)
                 self.send(*command)
             else:

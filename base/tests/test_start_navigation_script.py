@@ -20,6 +20,9 @@ class StartNavigationScriptTests(unittest.TestCase):
         self.assertIn('localhost_only="${TMR_CYCLE_ROS_LOCALHOST_ONLY:-1}"', SCRIPT)
         self.assertIn("ros2 daemon stop", SCRIPT)
         self.assertIn("unset CYCLONEDDS_URI", SCRIPT)
+        self.assertIn("flock -n 9", SCRIPT)
+        self.assertIn('/tmp/tmr_navigation_stack.ready', SCRIPT)
+        self.assertIn('rm -f "${ready_file}"', SCRIPT)
 
     def test_controller_manager_readiness_is_real_rpc_not_graph_cache(self):
         body = function_body("controller_manager_rpc")

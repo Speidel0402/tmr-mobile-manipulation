@@ -184,7 +184,7 @@ class RotationController(Node):
                 dt = clamp(now - last_tick, 0.02, 0.10)
                 last_tick = now
                 for index, (desired, acceleration) in enumerate(
-                    ((desired_vx, 0.12), (desired_vy, 0.12), (desired_wz, 0.45))
+                    ((desired_vx, 0.12), (desired_vy, 0.12), (desired_wz, 0.28))
                 ):
                     step = acceleration * dt
                     self.command[index] += clamp(desired - self.command[index], -step, step)

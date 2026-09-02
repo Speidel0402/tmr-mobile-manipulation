@@ -20,7 +20,7 @@ import yaml
 from action_msgs.msg import GoalStatus
 from control_msgs.action import GripperCommand
 from controller_manager_msgs.srv import SetHardwareComponentState, SwitchController
-from franka_msgs.action import PTPMotion
+from franka_msgs.action import ErrorRecovery, PTPMotion
 from franka_msgs.msg import FrankaRobotState
 from lifecycle_msgs.msg import State
 from rclpy.action import ActionClient
@@ -68,6 +68,9 @@ class ArmInitializer(Node):
             SetHardwareComponentState,
             f"/{arm}/controller_manager/set_hardware_component_state",
         )
+        self.error_recovery = ActionClient(
+            self, ErrorRecovery, f"/{arm}/action_server/error_recovery"
+        )
         self.action = ActionClient(self, PTPMotion, f"/{arm}/action_server/ptp_motion")
 
     def _on_joints(self, message: JointState) -> None:
@@ -93,6 +96,34 @@ class ArmInitializer(Node):
         request.target_state.label = "active"
         return self.call(self.hardware_client, request, timeout_s=12.0)
 
+    def _active_error_names(self) -> list[str]:
+        if self.robot_state is None:
+            return []
+        errors = self.robot_state.current_errors
+        return [
+            name
+            for name in errors.get_fields_and_field_types()
+            if bool(getattr(errors, name))
+        ]
+
+    def _recover_robot_error(self) -> bool:
+        if not self.error_recovery.wait_for_server(timeout_sec=3.0):
+            raise RuntimeError(f"{self.arm_name} error recovery action unavailable")
+        future = self.error_recovery.send_goal_async(ErrorRecovery.Goal())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        handle = future.result() if future.done() else None
+        if handle is None or not handle.accepted:
+            raise RuntimeError(f"{self.arm_name} error recovery goal rejected")
+        result_future = handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=12.0)
+        wrapped = result_future.result() if result_future.done() else None
+        if wrapped is None or wrapped.status != GoalStatus.STATUS_SUCCEEDED:
+            status = None if wrapped is None else int(wrapped.status)
+            raise RuntimeError(
+                f"{self.arm_name} error recovery failed (status={status})"
+            )
+        return True
+
     def wait_fresh_state(self, timeout_s: float = 1.5) -> None:
         self.q = None
         self.robot_state = None
@@ -109,12 +140,29 @@ class ArmInitializer(Node):
             raise RuntimeError(f"{self.arm_name} controller switch service unavailable")
         try:
             self.wait_fresh_state(timeout_s=1.0)
+            state_was_live = True
         except RuntimeError:
+            state_was_live = False
+
+        recovered = False
+        if state_was_live:
+            active_errors = self._active_error_names()
+            if active_errors:
+                time.sleep(0.35)
+                rclpy.spin_once(self, timeout_sec=0.05)
+                active_errors = self._active_error_names()
+                if active_errors:
+                    recovered = self._recover_robot_error()
+
+        if not state_was_live or recovered:
             response = self._set_hardware_active()
             if response.state.id != State.PRIMARY_STATE_ACTIVE:
                 response = self._set_hardware_active()
             if response.state.id != State.PRIMARY_STATE_ACTIVE:
-                raise RuntimeError(f"{self.arm_name} hardware activation failed")
+                raise RuntimeError(
+                    f"{self.arm_name} hardware activation failed; restart the arm "
+                    "controller process if this followed a Franka NetworkException"
+                )
         self.publish_hold_target(samples=3)
         request = SwitchController.Request()
         request.activate_controllers = [
@@ -130,6 +178,7 @@ class ArmInitializer(Node):
             raise RuntimeError(f"{self.arm_name} runtime controller recovery failed")
         self.publish_hold_target(samples=12)
         self.wait_fresh_state(timeout_s=12.0)
+        self.gate()
 
     def publish_hold_target(self, samples: int = 1) -> None:
         if self.hold_target is None:
@@ -155,19 +204,14 @@ class ArmInitializer(Node):
     def gate(self) -> None:
         if self.robot_state is None:
             raise RuntimeError(f"{self.arm_name} robot state lost")
-        fields = self.robot_state.current_errors.get_fields_and_field_types()
-        active = [name for name in fields if bool(getattr(self.robot_state.current_errors, name))]
+        active = self._active_error_names()
         if not active:
             return
         deadline = time.monotonic() + 0.35
         while time.monotonic() < deadline:
             rclpy.spin_once(self, timeout_sec=0.04)
             if self.robot_state is not None:
-                active = [
-                    name
-                    for name in fields
-                    if bool(getattr(self.robot_state.current_errors, name))
-                ]
+                active = self._active_error_names()
                 if not active:
                     return
         raise RuntimeError(f"persistent {self.arm_name} Franka error: " + ",".join(active))

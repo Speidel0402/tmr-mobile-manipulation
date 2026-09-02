@@ -122,7 +122,7 @@ class ForwardController(Node):
                 now = time.monotonic()
                 dt = clamp(now - last_tick, 0.02, 0.10)
                 last_tick = now
-                acceleration_steps = (0.15 * dt, 0.15 * dt, 0.45 * dt)
+                acceleration_steps = (0.15 * dt, 0.15 * dt, 0.28 * dt)
                 for index in range(3):
                     command[index] += clamp(
                         desired[index] - command[index],

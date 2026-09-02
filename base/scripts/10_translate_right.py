@@ -194,7 +194,7 @@ class RightTranslation(Node):
                 delta_time = clamp(now - last_tick, 0.02, 0.10)
                 last_tick = now
                 for index, (target, acceleration) in enumerate(
-                    ((desired[0], 0.15), (desired[1], 0.15), (desired[2], 0.40))
+                    ((desired[0], 0.15), (desired[1], 0.15), (desired[2], 0.28))
                 ):
                     step = acceleration * delta_time
                     self.command[index] += clamp(target - self.command[index], -step, step)

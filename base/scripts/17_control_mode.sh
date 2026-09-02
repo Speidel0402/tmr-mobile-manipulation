@@ -4,8 +4,8 @@ set -eo pipefail
 
 source /opt/ros/humble/setup.bash
 source "${HOME}/ros2_ws/install/setup.bash"
-export ROS_DOMAIN_ID="${TMR_CYCLE_ROS_DOMAIN_ID:-0}"
-export ROS_LOCALHOST_ONLY="${TMR_CYCLE_ROS_LOCALHOST_ONLY:-0}"
+export ROS_DOMAIN_ID="${TMR_CYCLE_ROS_DOMAIN_ID:-97}"
+export ROS_LOCALHOST_ONLY="${TMR_CYCLE_ROS_LOCALHOST_ONLY:-1}"
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 if [[ -f "${HOME}/cyclonedds.xml" ]]; then
   export CYCLONEDDS_URI="file://${HOME}/cyclonedds.xml"
@@ -20,14 +20,22 @@ publish_lease() {
     std_msgs/msg/Bool "{data: ${value}}" >/dev/null
 }
 
+process_environment_matches() {
+  local pid="$1"
+  local environ="/proc/${pid}/environ"
+  [[ -r "${environ}" ]] || return 1
+  tr '\0' '\n' <"${environ}" | grep -q '^RMW_IMPLEMENTATION=rmw_cyclonedds_cpp$' && \
+    tr '\0' '\n' <"${environ}" | grep -q "^ROS_DOMAIN_ID=${ROS_DOMAIN_ID}$" && \
+    tr '\0' '\n' <"${environ}" | grep -q "^ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY}$"
+}
+
 ensure_cmd_adapter() {
   local pid=''
   local -a pids=()
   mapfile -t pids < <(pgrep -f '^python3 .*scripts/cmd_vel_adapter.py([[:space:]]|$)' || true)
   if [[ "${#pids[@]}" == 1 ]]; then
     pid="${pids[0]}"
-    if tr '\0' '\n' <"/proc/${pid}/environ" | grep -q '^RMW_IMPLEMENTATION=rmw_cyclonedds_cpp$' && \
-       tr '\0' '\n' <"/proc/${pid}/environ" | grep -q "^ROS_DOMAIN_ID=${ROS_DOMAIN_ID}$"; then
+    if process_environment_matches "${pid}"; then
       return
     fi
   fi
@@ -53,8 +61,17 @@ stop_teleop_velocity_nodes() {
 }
 
 ensure_joy_node() {
-  if pgrep -f '^/opt/ros/humble/lib/joy/joy_node([[:space:]]|$)' >/dev/null; then
+  local pid=''
+  local -a pids=()
+  mapfile -t pids < <(pgrep -f '^/opt/ros/humble/lib/joy/joy_node([[:space:]]|$)' || true)
+  if [[ "${#pids[@]}" == 1 ]] && process_environment_matches "${pids[0]}"; then
     return
+  fi
+  for pid in "${pids[@]}"; do
+    kill -TERM "${pid}" 2>/dev/null || true
+  done
+  if [[ "${#pids[@]}" -gt 0 ]]; then
+    sleep 0.5
   fi
   screen -S tmr_joy_manual -X quit >/dev/null 2>&1 || true
   screen -dmS tmr_joy_manual /bin/bash -c \
@@ -62,8 +79,17 @@ ensure_joy_node() {
 }
 
 start_adapter_teleop() {
-  if pgrep -f '^/opt/ros/humble/lib/teleop_twist_joy/teleop_node.*cmd_vel:=/tmr_cycle/cmd_vel' >/dev/null; then
+  local pid=''
+  local -a pids=()
+  mapfile -t pids < <(pgrep -f '^/opt/ros/humble/lib/teleop_twist_joy/teleop_node.*cmd_vel:=/tmr_cycle/cmd_vel' || true)
+  if [[ "${#pids[@]}" == 1 ]] && process_environment_matches "${pids[0]}"; then
     return
+  fi
+  for pid in "${pids[@]}"; do
+    kill -TERM "${pid}" 2>/dev/null || true
+  done
+  if [[ "${#pids[@]}" -gt 0 ]]; then
+    sleep 0.5
   fi
   screen -S tmr_teleop_adapter -X quit >/dev/null 2>&1 || true
   screen -dmS tmr_teleop_adapter /bin/bash -c \

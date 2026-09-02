@@ -32,6 +32,10 @@ class ControlModeContracts(unittest.TestCase):
         self.assertIn("RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION}", SOURCE)
         self.assertIn("CYCLONEDDS_URI=${CYCLONEDDS_URI", SOURCE)
         self.assertIn("^ROS_DOMAIN_ID=${ROS_DOMAIN_ID}$", SOURCE)
+        self.assertIn("^ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY}$", SOURCE)
+        self.assertIn('TMR_CYCLE_ROS_DOMAIN_ID:-97', SOURCE)
+        self.assertIn('TMR_CYCLE_ROS_LOCALHOST_ONLY:-1', SOURCE)
+        self.assertGreaterEqual(SOURCE.count('process_environment_matches'), 4)
         self.assertIn('if [[ "${#pids[@]}" == 1 ]]', SOURCE)
         self.assertIn('for pid in "${pids[@]}"', SOURCE)
 

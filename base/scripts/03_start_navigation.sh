@@ -6,6 +6,7 @@ set -Eeo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 log_dir=""
+ready_file="/tmp/tmr_navigation_stack.ready"
 pids=()
 last_pid=""
 base_pid=""
@@ -209,6 +210,7 @@ wait_for_children_exit() {
 cleanup() {
   trap - EXIT INT TERM
   set +e
+  rm -f "${ready_file}"
   signal_alive_children INT
   wait_for_children_exit 6 || {
     signal_alive_children TERM
@@ -230,6 +232,12 @@ main() {
   esac
 
   configure_environment
+  exec 9>/tmp/tmr_navigation_stack.lock
+  if ! flock -n 9; then
+    echo "[error] the managed base/navigation stack is already running" >&2
+    return 72
+  fi
+  rm -f "${ready_file}"
   log_dir="${HOME}/tmr_cycle/logs/live_slam_$(date +%Y%m%d_%H%M%S)"
   mkdir -p "${log_dir}"
   {
@@ -280,6 +288,7 @@ main() {
   echo "[ready] isolated base, controller, odometry, dual LiDAR, SLAM and zero-latching adapter are running"
   echo "[env] ROS_DOMAIN_ID=${ROS_DOMAIN_ID}, ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY}"
   echo "[logs] ${log_dir}"
+  printf 'pid=%s\ndomain=%s\nready_unix_s=%s\n' "$$" "${ROS_DOMAIN_ID}" "$(date +%s)" >"${ready_file}"
 
   if [[ "${run_mission}" == true ]]; then
     start_process mission python3 "${root_dir}/scripts/07_start_to_pickup.py" \

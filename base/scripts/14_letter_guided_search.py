@@ -465,7 +465,7 @@ def run_ros(args: argparse.Namespace) -> dict:
             dt = clamp(now - last_tick, 0.02, 0.10)
             last_tick = now
             for index, (target, acceleration) in enumerate(
-                zip(desired, (0.15, 0.15, 0.42))
+                zip(desired, (0.15, 0.15, 0.28))
             ):
                 step = acceleration * dt
                 node.command[index] += clamp(target - node.command[index], -step, step)

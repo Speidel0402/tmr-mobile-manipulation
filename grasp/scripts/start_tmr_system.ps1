@@ -93,32 +93,47 @@ $baseHost = $config.Hosts.Base
 $robotHost = $config.Hosts.Robot
 $teleopHost = $config.Hosts.Teleop
 
-$baseEnvironment = @'
-source /opt/ros/humble/setup.bash
-source ~/ros2_ws/install/setup.bash
-'@
 $robotEnvironment = 'source ~/tmr_env.sh'
 
 Start-RemoteWindow -Title 'TMR Base' -HostConfig $baseHost -Command @"
-$baseEnvironment
-if pgrep -f '[t]mrv0_2.launch.py|[s]werve_drive_controller' >/dev/null; then
-  echo 'TMR base already appears to be running.'
-  exec bash
-fi
-exec ros2 launch franka_bringup tmrv0_2.launch.py controller_name:=swerve_drive_controller
+exec bash ~/tmr_cycle/scripts/03_start_navigation.sh
 "@
 Wait-Startup 'Base'
 
+Invoke-Remote -Title 'TMR base readiness' -HostConfig $baseHost -Command @"
+set -e
+for attempt in {1..75}; do
+  if [[ -s /tmp/tmr_navigation_stack.ready ]] && \
+     grep -q '^domain=97$' /tmp/tmr_navigation_stack.ready; then
+    echo 'Base controller, odometry, dual LiDAR, SLAM and command adapter are ready.'
+    exit 0
+  fi
+  sleep 1
+done
+echo 'Timed out waiting for the managed base stack.' >&2
+exit 72
+"@
+
 Start-RemoteWindow -Title 'ZED Head Camera' -HostConfig $baseHost -Command @"
-$baseEnvironment
-if pgrep -f '[z]ed_camera.launch.py|[z]ed_container' >/dev/null; then
-  echo 'ZED camera already appears to be running.'
-  exec bash
-fi
-cd ~/ros2_ws
-exec ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zedm namespace:=head_camera publish_tf:=false serial_number:=17064700
+exec bash ~/tmr_cycle/scripts/18_start_zed_stream.sh
 "@
 Wait-Startup 'Zed'
+
+Invoke-Remote -Title 'ZED RGB readiness' -HostConfig $baseHost -Command @"
+set -e
+for attempt in {1..30}; do
+  now=`$(date +%s)
+  modified=`$(stat -c %Y /tmp/tmr_zed_latest.jpg 2>/dev/null || echo 0)
+  if (( now - modified <= 2 )) && curl -fsS --max-time 2 \
+      http://127.0.0.1:18082/tmr_zed_latest.jpg >/dev/null; then
+    echo 'Serial-bound ZED RGB and HTTP bridge are fresh.'
+    exit 0
+  fi
+  sleep 1
+done
+echo 'Timed out waiting for the managed ZED stream.' >&2
+exit 73
+"@
 
 Start-RemoteWindow -Title 'Franka Spine' -HostConfig $robotHost -Command @"
 $robotEnvironment
@@ -160,20 +175,26 @@ if pgrep -f '[r]s_multi_camera_launch.py|[r]ealsense2_camera_node' >/dev/null; t
 fi
 exec ros2 launch realsense2_camera rs_multi_camera_launch.py \
   camera_namespace1:='/' camera_name1:=wrist_camera_left serial_no1:=_$($config.D405.LeftSerial) \
-  enable_sync1:=false enable_depth1:=true \
+  enable_sync1:=false enable_color1:=true enable_depth1:=false \
   depth_module.color_profile1:=640x480x30 depth_module.depth_profile1:=640x480x30 \
   camera_namespace2:='/' camera_name2:=wrist_camera_right serial_no2:=_$($config.D405.RightSerial) \
-  enable_sync2:=false enable_depth2:=true \
+  enable_sync2:=false enable_color2:=true enable_depth2:=false \
   depth_module.color_profile2:=640x480x30 depth_module.depth_profile2:=640x480x30
 "@
 Wait-Startup 'D405'
 
-# A zero Twist is a safe base neutral command. It intentionally does not try to
-# drive the mobile base back to an odometry origin.
-Invoke-Remote -Title 'base neutral command' -HostConfig $baseHost -Command @"
-$baseEnvironment
-ros2 topic pub --once /swerve_drive_controller/cmd_vel geometry_msgs/msg/TwistStamped \
-  '{twist: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}'
+Invoke-Remote -Title 'D405 RGB readiness' -HostConfig $robotHost -Command @"
+$robotEnvironment
+set -e
+timeout 12 ros2 topic echo --once --qos-reliability best_effort /wrist_camera_left/color/image_raw >/dev/null
+timeout 12 ros2 topic echo --once --qos-reliability best_effort /wrist_camera_right/color/image_raw >/dev/null
+echo 'Both serial-bound D405 RGB streams are fresh.'
+"@
+
+# Acquire the adapter lease with a zero target; never publish beside the
+# adapter on the controller's private input.
+Invoke-Remote -Title 'base mission-neutral mode' -HostConfig $baseHost -Command @"
+exec bash ~/tmr_cycle/scripts/17_control_mode.sh mission
 "@
 
 if (-not $SkipArmRestore) {

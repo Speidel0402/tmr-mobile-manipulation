@@ -192,7 +192,7 @@ class ReverseController(Node):
                 now = time.monotonic()
                 dt = clamp(now - last_tick, 0.02, 0.10)
                 last_tick = now
-                limits = (0.15 * dt, 0.15 * dt, 0.40 * dt)
+                limits = (0.15 * dt, 0.15 * dt, 0.28 * dt)
                 for index in range(3):
                     self.command[index] += clamp(desired[index] - self.command[index], -limits[index], limits[index])
                 self.publish(*self.command)

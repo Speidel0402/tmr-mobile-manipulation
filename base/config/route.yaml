@@ -11,7 +11,7 @@ bootstrap_mapping:
   forward_correction_speed: 0.03
   rotate_speed: 0.18
   max_linear_accel: 0.15
-  max_angular_accel: 0.45
+  max_angular_accel: 0.28
   rotation_deg: 360.0
   position_tolerance: 0.025
   yaw_tolerance_deg: 2.0

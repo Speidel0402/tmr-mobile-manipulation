@@ -36,6 +36,11 @@ class InitialPoseConsistencyTests(unittest.TestCase):
         self.assertIn("GripperCommand", source)
         self.assertIn('"both_grippers_reset"', source)
         self.assertIn("JOINT_HOLD_TOLERANCE_RAD = 0.006", source)
+        self.assertIn("ErrorRecovery", source)
+        self.assertLess(
+            source.index("self._recover_robot_error()"),
+            source.index("response = self._set_hardware_active()"),
+        )
         self.assertIn('"reset_required"', source)
         self.assertNotIn('"already_at_target"', source)
         self.assertIn("self.publish_hold_target(samples=12)", source)
@@ -60,6 +65,18 @@ class InitialPoseConsistencyTests(unittest.TestCase):
         startup = (ROOT / "config" / "system_startup.psd1").read_text(encoding="utf-8")
         for value in config["right"]["positions"]:
             self.assertIn(str(value), startup)
+
+    def test_base_startup_uses_one_isolated_graph(self) -> None:
+        source = (ROOT / "scripts" / "start_tmr_system.ps1").read_text(encoding="utf-8")
+        self.assertIn('18_start_zed_stream.sh', source)
+        self.assertIn('enable_depth1:=false', source)
+        self.assertIn('enable_depth2:=false', source)
+        self.assertIn('D405 RGB readiness', source)
+        self.assertIn('03_start_navigation.sh', source)
+        self.assertIn('17_control_mode.sh mission', source)
+        self.assertNotIn('/swerve_drive_controller/cmd_vel geometry_msgs', source)
+        self.assertIn('TMR base readiness', source)
+        self.assertIn('ZED RGB readiness', source)
 
 
 if __name__ == "__main__":

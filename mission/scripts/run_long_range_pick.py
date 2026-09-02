@@ -183,10 +183,11 @@ def _base_environment() -> str:
             "source \"${HOME}/ros2_ws/install/setup.bash\"",
             "source \"${HOME}/tmr_navigation/install/setup.bash\"",
             "source \"${HOME}/tmr_navigation/install/tmr_local_navigation/share/tmr_local_navigation/local_setup.bash\"",
-            # The already-running base/controller/LiDAR stack is on domain 0.
-            # Keep every onboard mission phase in that same graph.
-            "export ROS_DOMAIN_ID=${TMR_CYCLE_ROS_DOMAIN_ID:-0}",
-            "export ROS_LOCALHOST_ONLY=${TMR_CYCLE_ROS_LOCALHOST_ONLY:-0}",
+            # Keep every base-local mission phase in the same isolated Humble
+            # graph as 03_start_navigation.sh.  The Jazzy arm host is
+            # orchestrated over SSH, not by mixing both ROS graphs.
+            "export ROS_DOMAIN_ID=${TMR_CYCLE_ROS_DOMAIN_ID:-97}",
+            "export ROS_LOCALHOST_ONLY=${TMR_CYCLE_ROS_LOCALHOST_ONLY:-1}",
             "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp",
             "export PYTHONUNBUFFERED=1",
             # Debug/resume overrides were useful during manual experiments,

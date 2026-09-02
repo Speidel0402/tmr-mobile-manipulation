@@ -99,7 +99,7 @@ class Controller(Node):
                 now = time.monotonic()
                 dt = clamp(now - last_tick, 0.02, 0.10)
                 last_tick = now
-                for index, (target, accel) in enumerate(zip(desired, (0.15, 0.15, 0.4))):
+                for index, (target, accel) in enumerate(zip(desired, (0.15, 0.15, 0.28))):
                     step = accel * dt
                     self.command[index] += clamp(target - self.command[index], -step, step)
                 self.publish(*self.command)

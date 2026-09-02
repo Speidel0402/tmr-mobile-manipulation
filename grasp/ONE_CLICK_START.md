@@ -3,7 +3,7 @@
 本地入口：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\rim_grasp_perception\scripts\start_tmr_system.ps1
+powershell -ExecutionPolicy Bypass -File .\grasp\scripts\start_tmr_system.ps1
 ```
 
 脚本依次连接三台主机并启动：
@@ -20,26 +20,26 @@ powershell -ExecutionPolicy Bypass -File .\rim_grasp_perception\scripts\start_tm
 完整启动但不启用遥操作：
 
 ```powershell
-.\rim_grasp_perception\scripts\start_tmr_system.ps1
+.\grasp\scripts\start_tmr_system.ps1
 ```
 
 完成初始化后再启用 GELLO 和脚踏板：
 
 ```powershell
-.\rim_grasp_perception\scripts\start_tmr_system.ps1 -EnableTeleop
+.\grasp\scripts\start_tmr_system.ps1 -EnableTeleop
 ```
 
 只启动节点，不恢复双臂或初始化夹爪：
 
 ```powershell
-.\rim_grasp_perception\scripts\start_tmr_system.ps1 `
+.\grasp\scripts\start_tmr_system.ps1 `
   -SkipArmRestore -SkipGripperInitialize
 ```
 
 只打印计划执行的远程命令，不连接机器人：
 
 ```powershell
-.\rim_grasp_perception\scripts\start_tmr_system.ps1 -DryRun
+.\grasp\scripts\start_tmr_system.ps1 -DryRun
 ```
 
 ## 配置

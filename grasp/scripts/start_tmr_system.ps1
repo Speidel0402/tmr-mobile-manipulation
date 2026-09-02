@@ -181,6 +181,7 @@ if pgrep -f '[s]tart_left_ik_service.py' >/dev/null; then
     pgrep -f '[s]tart_left_ik_service.py' >/dev/null || break
     sleep 0.1
   done
+  pkill -TERM -f '[s]tart_left_ik_service.py' 2>/dev/null || true
   pkill -TERM -f '[m]ove_group.*-r __ns:=/left_ik' 2>/dev/null || true
 fi
 cd ~/tmr-mobile-manipulation
@@ -220,6 +221,7 @@ if pgrep -f '[r]s_multi_camera_launch.py|[r]ealsense2_camera_node' >/dev/null; t
     pgrep -f '[r]s_multi_camera_launch.py|[r]ealsense2_camera_node.*__node:=wrist_camera_' >/dev/null || break
     sleep 0.1
   done
+  pkill -TERM -f '[r]os2 launch realsense2_camera rs_multi_camera_launch.py' 2>/dev/null || true
   pkill -TERM -f '[r]ealsense2_camera_node.*__node:=wrist_camera_' 2>/dev/null || true
 fi
 exec ros2 launch realsense2_camera rs_multi_camera_launch.py \
@@ -253,6 +255,7 @@ for attempt in {1..20}; do
   pgrep -f '[c]amera_mjpeg_viewer.py.*--port 18080' >/dev/null || break
   sleep 0.1
 done
+pkill -TERM -f '[c]amera_mjpeg_viewer.py.*--port 18080' 2>/dev/null || true
 exec python3 tools/camera_mjpeg_viewer.py \
   --port 18080 --camera-role left_wrist \
   --rgb-topic /wrist_camera_left/color/image_raw \

@@ -5,6 +5,7 @@ import argparse
 import io
 import json
 import math
+from pathlib import Path
 import time
 import urllib.request
 
@@ -167,11 +168,22 @@ def cup_right_once(bgr):
     return detect_green_cup_right(bgr)
 
 
+def rim_radius_from_detail(detail):
+    if "radius_px" in detail:
+        return float(detail["radius_px"])
+    if "food_bowl" in detail:
+        return float(detail["food_bowl"]["radius"])
+    if "plate" in detail:
+        return 0.5 * float(detail["plate"]["equivalent_diameter_px"])
+    raise RuntimeError("detector did not report a calibrated rim size")
+
+
 def detect_cup_right(
     previous_stamp=None,
     timeout=15.0,
     expected_session_id=None,
     expected_point=None,
+    expected_radius_px=None,
     maximum_tracking_error_px=80.0,
 ):
     # A completed arm action can leave a short camera/fixture oscillation.
@@ -192,6 +204,17 @@ def detect_cup_right(
                 continue
             last_stamp = stamp
             point, detail = cup_right_once(bgr)
+            radius_px = rim_radius_from_detail(detail)
+            if (
+                expected_radius_px is not None
+                and abs(radius_px - float(expected_radius_px)) > 3.5
+            ):
+                last_error = (
+                    f"rim identity changed: radius {radius_px:.2f}px versus "
+                    f"{float(expected_radius_px):.2f}px"
+                )
+                time.sleep(0.025)
+                continue
             if expected_point is not None:
                 tracking_error = float(
                     np.linalg.norm(np.asarray(point, dtype=float) - np.asarray(expected_point, dtype=float))
@@ -203,30 +226,77 @@ def detect_cup_right(
                     )
                     time.sleep(0.025)
                     continue
-            observations.append((point, stamp, detail))
+            observations.append((point, stamp, detail, radius_px, bgr))
             observations = observations[-VISION_STABLE_FRAMES:]
             if len(observations) >= VISION_STABLE_FRAMES:
                 points = np.asarray([item[0] for item in observations], dtype=float)
                 center = np.median(points, axis=0)
                 deviations = np.linalg.norm(points - center, axis=1)
-                if float(np.max(deviations)) <= VISION_STABLE_RADIUS_PX:
+                radii = np.asarray([item[3] for item in observations], dtype=float)
+                radius_center = float(np.median(radii))
+                radius_spread = float(np.max(np.abs(radii - radius_center)))
+                if (
+                    float(np.max(deviations)) <= VISION_STABLE_RADIUS_PX
+                    and radius_spread <= 3.0
+                ):
                     point = center
                     return {
                         "point": point,
                         "stamp": float(max(item[1] for item in observations)),
                         "spread_px": float(np.max(deviations)),
                         "detail": observations[-1][2],
+                        "rim_radius_px": radius_center,
+                        "radius_spread_px": radius_spread,
+                        "rgb": observations[-1][4],
                         "camera_session_id": expected_session_id,
                     }
                 last_error = (
-                    f"rim still settling; five-frame spread "
-                    f"{float(np.max(deviations)):.1f}px"
+                    f"rim still settling; point spread "
+                    f"{float(np.max(deviations)):.1f}px, radius spread {radius_spread:.1f}px"
                 )
             time.sleep(0.025)
         except Exception as exc:
             last_error = repr(exc)
             time.sleep(0.04)
-    raise RuntimeError("fresh three-frame cup detection failed: " + last_error)
+    raise RuntimeError(
+        f"fresh {VISION_STABLE_FRAMES}-frame cup detection failed: " + last_error
+    )
+
+
+def save_alignment_diagnostic(observation):
+    """Persist the exact fresh frame that authorized the downward motion."""
+    image = observation["rgb"].copy()
+    point = tuple(int(round(value)) for value in observation["point"])
+    detail = observation["detail"]
+    center_values = detail.get("center_px")
+    if center_values is None and "food_bowl" in detail:
+        center_values = [
+            detail["food_bowl"]["center_x"], detail["food_bowl"]["center_y"]
+        ]
+    if center_values is None and "plate" in detail:
+        center_values = [detail["plate"]["center_x"], detail["plate"]["center_y"]]
+    if center_values is not None:
+        center = tuple(int(round(value)) for value in center_values)
+        cv2.circle(image, center, int(round(observation["rim_radius_px"])), (0, 255, 0), 2)
+    cv2.drawMarker(image, point, (0, 0, 255), cv2.MARKER_CROSS, 24, 3)
+    image_path = Path("/tmp/tmr_last_pick_alignment.jpg")
+    json_path = Path("/tmp/tmr_last_pick_alignment.json")
+    if not cv2.imwrite(str(image_path), image):
+        raise RuntimeError("failed to save final alignment diagnostic")
+    json_path.write_text(
+        json.dumps(
+            {
+                "rgb_stamp": observation["stamp"],
+                "point_px": observation["point"].tolist(),
+                "rim_radius_px": observation["rim_radius_px"],
+                "radius_spread_px": observation["radius_spread_px"],
+                "detector": detail,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    emit("alignment_diagnostic_saved", image=str(image_path), metadata=str(json_path))
 
 
 def command_gripper(node, position, label):
@@ -300,9 +370,74 @@ def close_gripper_once(node):
     result["verdict"] = verdict
     history = [{"attempt": 1, "close": result}]
     emit("close_verdict", attempt=1, valid=valid, progress=progress, verdict=verdict)
-    if not valid:
+    if not valid and verdict != "fully_closed_unconfirmed":
         raise RuntimeError("single close did not confirm object contact: " + repr(history))
     return result, history
+
+
+def verify_object_removed_after_lift(
+    alignment,
+    expected_session_id,
+    minimum_fresh_frames=7,
+    timeout_s=4.0,
+):
+    """Confirm that the aligned table rim did not remain after the lift.
+
+    A thin rim can let the Robotiq action finish close to its commanded end,
+    so gripper position alone cannot distinguish a pinch from an empty close.
+    At the restored top pose an object left on the table reappears at the same
+    pixel/radius; a carried object does not retain that table-view geometry.
+    """
+    reference_point = np.asarray(alignment["point"], dtype=float)
+    reference_radius = float(alignment["observation"]["rim_radius_px"])
+    previous_stamp = float(alignment["observation"]["stamp"])
+    fresh_frames = 0
+    matching_frames = 0
+    last_match = None
+    deadline = time.monotonic() + float(timeout_s)
+    last_error = "no advancing post-lift RGB frame"
+    while time.monotonic() < deadline and fresh_frames < int(minimum_fresh_frames):
+        try:
+            image, stamp, session_id = snapshot_rgb(expected_session_id)
+            if stamp <= previous_stamp + 1e-6:
+                time.sleep(0.03)
+                continue
+            previous_stamp = stamp
+            fresh_frames += 1
+            try:
+                point, detail = cup_right_once(image)
+                radius = rim_radius_from_detail(detail)
+                point_error = float(
+                    np.linalg.norm(np.asarray(point, dtype=float) - reference_point)
+                )
+                radius_error = abs(radius - reference_radius)
+                if point_error <= 35.0 and radius_error <= 4.0:
+                    matching_frames += 1
+                    last_match = {
+                        "point_px": np.asarray(point, dtype=float).tolist(),
+                        "rim_radius_px": radius,
+                        "point_error_px": point_error,
+                        "radius_error_px": radius_error,
+                    }
+            except RuntimeError as exc:
+                last_error = str(exc)
+        except Exception as exc:
+            last_error = repr(exc)
+        time.sleep(0.035)
+    if fresh_frames < int(minimum_fresh_frames):
+        raise RuntimeError(
+            f"post-lift camera did not provide {minimum_fresh_frames} fresh frames: "
+            + last_error
+        )
+    removed = matching_frames < 3
+    report = {
+        "removed_from_table_view": removed,
+        "fresh_frames": fresh_frames,
+        "matching_frames": matching_frames,
+        "last_match": last_match,
+    }
+    emit("post_lift_visual_grasp_check", **report)
+    return report
 
 
 def top_errors(pose):
@@ -422,15 +557,18 @@ def recover_best_visual_pose(arm, best, stamp, camera_session_id, iterations, re
             previous_stamp=stamp,
             expected_session_id=camera_session_id,
             expected_point=best["point"],
+            expected_radius_px=best["observation"]["rim_radius_px"],
             maximum_tracking_error_px=35.0,
         )
         best["point"] = confirmation["point"]
         best["error"] = TARGET - confirmation["point"]
         best["observation"] = confirmation
     except RuntimeError as exc:
-        # The cached observation was captured at this exact joint pose.  A
-        # transient missed frame must not discard an already usable alignment.
+        # Never descend from a cached visual result.  Failure to reconfirm the
+        # same rim on advancing frames means that identity/alignment is no
+        # longer proven, even if the arm returned to the same joint pose.
         emit("best_pose_confirmation_unavailable", reason=reason, error=str(exc))
+        return None
     if cup_grasp_alignment_accepted(
         best["error"], MAX_RECOVERABLE_VISUAL_ERROR_PX, confirmation=True
     ):
@@ -446,6 +584,7 @@ def recover_best_visual_pose(arm, best, stamp, camera_session_id, iterations, re
             "error": best["error"],
             "iterations": iterations,
             "mode": "best_pose_at_kinematic_boundary",
+            "observation": best["observation"],
         }
     return None
 
@@ -458,25 +597,37 @@ def calibrate(arm, camera_session_id, preflight_stamp):
         expected_session_id=camera_session_id,
     )
     p0, stamp = first["point"], first["stamp"]
-    emit("observe", stage="initial", point_px=p0.tolist(), target_px=TARGET.tolist(), spread_px=first["spread_px"])
+    reference_radius_px = first["rim_radius_px"]
+    emit(
+        "observe", stage="initial", point_px=p0.tolist(),
+        target_px=TARGET.tolist(), spread_px=first["spread_px"],
+        rim_radius_px=reference_radius_px,
+        radius_spread_px=first["radius_spread_px"], detector=first["detail"],
+    )
     initial_error = TARGET - p0
     initial_tolerance = visual_tolerance(first)
     if cup_grasp_alignment_accepted(initial_error, initial_tolerance):
         emit("aligned_near", point_px=p0.tolist(), error_px=initial_error.tolist(), tolerance_px=initial_tolerance, reason="initial_within_detector_resolution")
-        return {"point": p0, "error": initial_error, "iterations": 0, "mode": "initial_soft_accept"}
+        return {"point": p0, "error": initial_error, "iterations": 0, "mode": "initial_soft_accept", "observation": first}
 
     # When the target begins at the extreme right, probe inward so the first
     # calibration motion cannot push its rim out of the image.
     probe_x_sign = -1.0 if float(p0[0]) > 600.0 else 1.0
     actual_x, base_x, _ = arm.move_xy([0.007 * probe_x_sign, 0.0])
-    obs_x = detect_cup_right(previous_stamp=stamp, expected_session_id=camera_session_id)
+    obs_x = detect_cup_right(
+        previous_stamp=stamp, expected_session_id=camera_session_id,
+        expected_point=p0, expected_radius_px=reference_radius_px,
+    )
     px, stamp = obs_x["point"], obs_x["stamp"]
-    emit("probe", axis="x", actual_m=actual_x.tolist(), point_px=px.tolist())
+    emit("probe", axis="x", actual_m=actual_x.tolist(), point_px=px.tolist(), rim_radius_px=obs_x["rim_radius_px"])
 
     actual_y, base_y, _ = arm.move_xy([-0.007 * probe_x_sign, 0.007])
-    obs_y = detect_cup_right(previous_stamp=stamp, expected_session_id=camera_session_id)
+    obs_y = detect_cup_right(
+        previous_stamp=stamp, expected_session_id=camera_session_id,
+        expected_point=p0, expected_radius_px=reference_radius_px,
+    )
     py, stamp = obs_y["point"], obs_y["stamp"]
-    emit("probe", axis="y", actual_m=actual_y.tolist(), point_px=py.tolist())
+    emit("probe", axis="y", actual_m=actual_y.tolist(), point_px=py.tolist(), rim_radius_px=obs_y["rim_radius_px"])
 
     displacement = np.column_stack((base_x - base_origin, base_y - base_origin))
     pixels = np.column_stack((px - p0, py - p0))
@@ -521,6 +672,7 @@ def calibrate(arm, camera_session_id, preflight_stamp):
                 previous_stamp=stamp,
                 expected_session_id=camera_session_id,
                 expected_point=current_point,
+                expected_radius_px=reference_radius_px,
                 maximum_tracking_error_px=30.0,
             )
             stamp = confirm["stamp"]
@@ -530,7 +682,7 @@ def calibrate(arm, camera_session_id, preflight_stamp):
                 final_error, hold_tolerance, confirmation=True
             ):
                 emit("aligned", iteration=iteration - 1, point_px=confirm["point"].tolist(), error_px=final_error.tolist(), tolerance_px=hold_tolerance, reason="confirmed_with_hysteresis")
-                return {"point": confirm["point"], "error": final_error, "iterations": iteration - 1, "mode": "confirmed_soft_accept"}
+                return {"point": confirm["point"], "error": final_error, "iterations": iteration - 1, "mode": "confirmed_soft_accept", "observation": confirm}
             current_point = confirm["point"]
             current_observation = confirm
             error = final_error
@@ -585,6 +737,7 @@ def calibrate(arm, camera_session_id, preflight_stamp):
             previous_stamp=stamp,
             expected_session_id=camera_session_id,
             expected_point=predicted_point,
+            expected_radius_px=reference_radius_px,
             maximum_tracking_error_px=70.0,
         )
         stamp = observation["stamp"]
@@ -616,7 +769,7 @@ def calibrate(arm, camera_session_id, preflight_stamp):
                 "observation": observation,
                 "norm": new_norm,
             }
-        emit("correct", iteration=iteration, command_m=step.tolist(), actual_m=actual.tolist(), point_px=new_point.tolist(), error_px=(TARGET-new_point).tolist(), error_norm_px=new_norm, z=float(end_pose.position.z))
+        emit("correct", iteration=iteration, command_m=step.tolist(), actual_m=actual.tolist(), point_px=new_point.tolist(), error_px=(TARGET-new_point).tolist(), error_norm_px=new_norm, rim_radius_px=observation["rim_radius_px"], z=float(end_pose.position.z))
         current_point, current_base, current_observation = new_point, new_base, observation
         if stagnation >= 3:
             jacobian = probe_jacobian.copy()
@@ -827,6 +980,7 @@ def main():
         validate_top(top_pose)
         top_z = float(top_pose.position.z)
         phase = "ALIGNED"
+        save_alignment_diagnostic(alignment["observation"])
         emit("order_confirmed", completed="visual_alignment", next="descend", final_error_px=alignment["error"].tolist())
 
         phase = "DESCENDING"
@@ -846,15 +1000,29 @@ def main():
 
         phase = "CLOSING"
         closed, close_history = close_gripper_once(gripper)
-        phase = "GRASP_VERIFIED"
-        emit("order_confirmed", completed="close", next="lift")
+        emit(
+            "order_confirmed",
+            completed="close",
+            next="lift_then_visual_grasp_confirmation",
+            close_verdict=closed["verdict"],
+        )
 
         current = arm.fk(list(arm.q))
         phase = "LIFTING"
         final_pose, up_actual = move_vertical(arm, top_z - float(current.position.z))
+        phase = "POST_LIFT_VERIFY"
+        removal_report = verify_object_removed_after_lift(
+            alignment,
+            camera_session_id,
+        )
+        if not removal_report["removed_from_table_view"]:
+            raise RuntimeError(
+                "aligned object remained at the pickup-table location after lift"
+            )
+        phase = "GRASP_VERIFIED"
         phase = "DONE"
         cycle_success = True
-        emit("success", alignment_error_px=alignment["error"].tolist(), alignment_mode=alignment.get("mode"), down_actual_m=down_actual, up_actual_m=up_actual, final_z=float(final_pose.position.z), top_height_error_m=float(final_pose.position.z)-top_z, close=closed, close_history=close_history)
+        emit("success", alignment_error_px=alignment["error"].tolist(), alignment_mode=alignment.get("mode"), down_actual_m=down_actual, up_actual_m=up_actual, final_z=float(final_pose.position.z), top_height_error_m=float(final_pose.position.z)-top_z, close=closed, close_history=close_history, post_lift_visual=removal_report)
     except KeyboardInterrupt:
         operator_stop = True
         emit("operator_stop", stopped_at_phase=phase, action="hold_without_recovery_motion")

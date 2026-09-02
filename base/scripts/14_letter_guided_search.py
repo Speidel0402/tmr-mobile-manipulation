@@ -175,38 +175,59 @@ class CenterHold:
             and spread <= 0.040
         )
         latest = self.samples[-1]
+        # The wider acquisition band is only history/hysteresis.  Do not stop
+        # the base until the latest observation is actually in the accepted
+        # centre band; the old behavior could wait forever at x=0.57.
+        holding = abs(latest.center_x_norm - 0.5) <= self.center_tolerance_norm
         credible_crossing = (
             float(now) - self.started_at >= self.single_frame_hold_s
             and abs(latest.center_x_norm - 0.5) <= self.center_tolerance_norm
             and latest.confidence >= self.single_frame_confidence
         )
-        return True, bool(repeated or credible_crossing), mean, spread
+        return holding, bool(repeated or credible_crossing), mean, spread
 
 
 class AdaptiveCenterPolicy:
     """Learn d(image-x)/d(robot-right) and close the image-centering loop."""
 
-    def __init__(self, search_speed_mps: float, refine_speed_mps: float) -> None:
+    def __init__(
+        self,
+        search_speed_mps: float,
+        refine_speed_mps: float,
+        minimum_gain_confidence: float = 0.55,
+    ) -> None:
         self.search_speed_mps = float(search_speed_mps)
         self.refine_speed_mps = float(refine_speed_mps)
-        self.previous: TargetObservation | None = None
+        self.gain_anchor: TargetObservation | None = None
         self.image_gain_per_m: float | None = None
         self.last_direction = 1.0
+        self.minimum_gain_confidence = float(minimum_gain_confidence)
+
+    def reliable(self, observation: TargetObservation | None) -> bool:
+        return (
+            observation is not None
+            and observation.confidence >= self.minimum_gain_confidence
+        )
 
     def command(self, observation: TargetObservation | None) -> float:
-        if observation is None:
-            return self.search_speed_mps if self.previous is None else 0.45 * self.search_speed_mps * self.last_direction
-        if self.previous is not None and self.previous.members == observation.members:
-            delta_m = observation.right_m - self.previous.right_m
+        if not self.reliable(observation):
+            return self.search_speed_mps if self.gain_anchor is None else 0.0
+        assert observation is not None
+        if self.gain_anchor is not None and self.gain_anchor.members == observation.members:
+            delta_m = observation.right_m - self.gain_anchor.right_m
             if abs(delta_m) >= 0.018:
-                sample = (observation.center_x_norm - self.previous.center_x_norm) / delta_m
+                sample = (observation.center_x_norm - self.gain_anchor.center_x_norm) / delta_m
                 if 0.04 <= abs(sample) <= 8.0:
                     self.image_gain_per_m = (
                         sample
                         if self.image_gain_per_m is None
                         else 0.65 * self.image_gain_per_m + 0.35 * sample
                     )
-        self.previous = observation
+                # Keep a spatially separated anchor; updating it every video
+                # frame prevented the 18 mm gain sample from ever forming.
+                self.gain_anchor = observation
+        else:
+            self.gain_anchor = observation
         error = observation.center_x_norm - 0.5
         if abs(error) <= 0.055:
             return 0.0
@@ -393,7 +414,8 @@ def run_ros(args: argparse.Namespace) -> dict:
                 )
                 if latest_observation is not None:
                     target_frames += 1
-                    last_target_at = time.monotonic()
+                    if policy.reliable(latest_observation):
+                        last_target_at = time.monotonic()
                     print(json.dumps({
                         "event": "target_observed",
                         "target": args.target_letter,
@@ -430,13 +452,19 @@ def run_ros(args: argparse.Namespace) -> dict:
                     "end_odom": [end_x, end_y, end_yaw],
                     "yaw_error_deg": math.degrees(wrap(end_yaw - start_yaw)),
                 }
-            right_speed = 0.0 if holding_center else policy.command(latest_observation)
+            control_observation = (
+                latest_observation if policy.reliable(latest_observation) else None
+            )
+            right_speed = 0.0 if holding_center else policy.command(control_observation)
             if (
                 not holding_center
                 and last_target_at is not None
-                and time.monotonic() - last_target_at > 1.4
+                and time.monotonic() - last_target_at <= 0.8
+                and control_observation is None
             ):
-                right_speed = 0.35 * args.search_speed_mps * policy.last_direction
+                # A missed detector frame must not carry a previously visible
+                # card out of view.  Pause briefly and let vision reacquire.
+                right_speed = 0.0
             if right_speed > 0.0 and right_m >= args.max_right_m - 0.025:
                 node.stop(30)
                 raise RuntimeError(

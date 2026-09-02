@@ -97,6 +97,24 @@ class LetterVisionContracts(unittest.TestCase):
         self.assertIsNotNone(policy.image_gain_per_m)
         self.assertGreater(command, 0.0)
 
+    def test_gain_anchor_survives_high_frame_rate_small_steps(self) -> None:
+        policy = search.AdaptiveCenterPolicy(0.055, 0.04)
+        for right_m, x in ((0.50, 0.70), (0.506, 0.696), (0.512, 0.692), (0.519, 0.687)):
+            policy.command(search.TargetObservation(right_m, x, "near", 0.86, 1))
+        self.assertIsNotNone(policy.image_gain_per_m)
+        self.assertLess(policy.image_gain_per_m, 0.0)
+
+    def test_low_confidence_detection_cannot_reverse_gain(self) -> None:
+        policy = search.AdaptiveCenterPolicy(0.055, 0.04)
+        policy.command(search.TargetObservation(1.00, 0.70, "near", 0.86, 1))
+        policy.command(search.TargetObservation(1.03, 0.68, "near", 0.86, 1))
+        learned = policy.image_gain_per_m
+        self.assertEqual(
+            policy.command(search.TargetObservation(1.30, 0.90, "near", 0.29, 1)),
+            0.0,
+        )
+        self.assertEqual(policy.image_gain_per_m, learned)
+
     def test_center_crossing_stops_then_accepts_a_credible_single_frame(self) -> None:
         hold = search.CenterHold(0.055, single_frame_hold_s=0.30)
         holding, centered, _, _ = hold.update(
@@ -113,6 +131,14 @@ class LetterVisionContracts(unittest.TestCase):
         hold = search.CenterHold(0.055, single_frame_hold_s=0.30)
         hold.update(search.TargetObservation(1.2, 0.51, "near", 0.20, 1), 4.0)
         self.assertFalse(hold.status(4.31)[1])
+
+    def test_acquisition_band_does_not_stop_outside_center_tolerance(self) -> None:
+        hold = search.CenterHold(0.055, acquire_tolerance_norm=0.080)
+        holding, centered, _, _ = hold.update(
+            search.TargetObservation(1.2, 0.57, "near", 0.86, 1), 4.0
+        )
+        self.assertFalse(holding)
+        self.assertFalse(centered)
 
 
 if __name__ == "__main__":

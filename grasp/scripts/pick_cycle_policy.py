@@ -90,28 +90,17 @@ def classify_close_result(
     elif (
         int(result["status"]) == STATUS_SUCCEEDED
         and bool(result["reached_goal"])
-        and 0.005 <= gap <= 0.03
+        and gap < 0.03
     ):
-        # The Robotiq controller can report reached_goal when contact occurs
-        # inside its goal tolerance.  The real cup grasp observed on hardware
-        # ended at 0.7929 for a 0.8000 command (7.1 mm command-space gap) and
-        # visibly held the cup.  Preserve that evidence while still rejecting
-        # an actually empty close at the 0.8000 mechanical endpoint.
-        classification = "object_contact_within_goal_tolerance"
-    elif (
-        int(result["status"]) == STATUS_SUCCEEDED
-        and bool(result["reached_goal"])
-        and gap < 0.005
-    ):
+        # A reached goal near the mechanical endpoint proves only that the
+        # fingers closed.  The 2026-09-02 miss ended at 0.7929 and was falsely
+        # treated as contact, so near-closed success is never grasp evidence.
         classification = "fully_closed_unconfirmed"
     else:
         classification = "indeterminate_close"
 
     return {
-        "accepted_as_grasp": classification in {
-            "object_contact_candidate",
-            "object_contact_within_goal_tolerance",
-        },
+        "accepted_as_grasp": classification == "object_contact_candidate",
         "classification": classification,
         "progress": float(progress),
         "required_progress": float(required_progress),

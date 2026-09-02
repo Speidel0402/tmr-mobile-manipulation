@@ -4,6 +4,10 @@
 import unittest
 from pathlib import Path
 
+import numpy as np
+
+from cup_rim_detector import nested_in_larger_rim
+
 from pick_cycle_policy import (
     classify_close_result,
     cup_grasp_alignment_accepted,
@@ -32,6 +36,8 @@ class PickCyclePolicyTests(unittest.TestCase):
         self.assertIn("z_tolerance=0.010", source)
         self.assertIn('"--force-restore-top"', source)
         self.assertIn("if args.force_restore_top or pose_policy != \"accept\":", source)
+        self.assertIn("save_alignment_diagnostic(alignment[\"observation\"])", source)
+        self.assertIn("verify_object_removed_after_lift(", source)
 
     def test_franka_gate_debounces_only_transient_errors(self):
         source = (Path(__file__).parent / "servo_cup_edge_xy.py").read_text(
@@ -110,7 +116,7 @@ class PickCyclePolicyTests(unittest.TestCase):
         self.assertEqual(verdict["classification"], "fully_closed_unconfirmed")
         self.assertFalse(verdict["accepted_as_grasp"])
 
-    def test_real_cup_contact_inside_controller_goal_tolerance_is_accepted(self):
+    def test_near_closed_success_is_not_contact_evidence(self):
         result = {
             "status": 4,
             "position": 0.7929,
@@ -119,10 +125,16 @@ class PickCyclePolicyTests(unittest.TestCase):
             "feedback_positions": [],
         }
         verdict = classify_close_result(result)
-        self.assertEqual(
-            verdict["classification"], "object_contact_within_goal_tolerance"
+        self.assertEqual(verdict["classification"], "fully_closed_unconfirmed")
+        self.assertFalse(verdict["accepted_as_grasp"])
+
+    def test_bowl_inner_circle_is_not_accepted_as_cup(self):
+        self.assertTrue(
+            nested_in_larger_rim(200.0, 120.0, 34.0, np.asarray([[202.0, 121.0, 45.0]]))
         )
-        self.assertTrue(verdict["accepted_as_grasp"])
+        self.assertFalse(
+            nested_in_larger_rim(80.0, 120.0, 34.0, np.asarray([[202.0, 121.0, 56.0]]))
+        )
 
     def test_observed_empty_near_closed_stall_is_rejected(self):
         result = {

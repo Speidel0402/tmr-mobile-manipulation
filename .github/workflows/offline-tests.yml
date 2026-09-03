@@ -4,19 +4,43 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.profile }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: primary
+            os: ubuntu-24.04
+            python: "3.11"
+            requirements: requirements-offline.txt
+          - profile: base-compatible
+            os: ubuntu-22.04
+            python: "3.10"
+            requirements: requirements-offline-base.txt
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
         with:
-          python-version: "3.11"
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: ${{ matrix.requirements }}
       - name: Install offline dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest numpy pyyaml scipy opencv-python-headless pillow
-          python -m pip install -e grasp
+          python -m pip install -r "${{ matrix.requirements }}"
+          python -m pip install --no-deps -e grasp
+          python -m pip check
+      - name: Report vision dependency versions
+        run: python -c "import cv2, numpy; print('OpenCV', cv2.__version__, 'NumPy', numpy.__version__)"
       - name: Run tests
-        run: python -m pytest base/tests grasp/tests grasp/scripts/test_pick_cycle_policy.py
-
+        run: python -m pytest base/tests grasp/tests grasp/scripts/test_pick_cycle_policy.py mission/tests
+      - name: Compile Python sources
+        run: python -m compileall -q base/scripts grasp/scripts mission/scripts tools

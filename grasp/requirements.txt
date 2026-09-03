@@ -1,5 +1,5 @@
 numpy>=1.26,<3
-opencv-python>=4.8
+opencv-python>=4.8,<5
 PyYAML>=6
 scipy>=1.11
 open3d>=0.18

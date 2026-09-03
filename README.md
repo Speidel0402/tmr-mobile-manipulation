@@ -1,10 +1,28 @@
 # TMR Mobile Manipulation
 
+**EBiM Competition 2026 · Task 3 — Assisted Living & Feeding**
+
+**Phase II — Real-Robot Validation**
+
 [![Offline tests](https://github.com/Speidel0402/tmr-mobile-manipulation/actions/workflows/offline-tests.yml/badge.svg)](https://github.com/Speidel0402/tmr-mobile-manipulation/actions/workflows/offline-tests.yml)
 
 Competition submission for a TMR mobile manipulation platform with dual Franka FR3 arms, Robotiq grippers, a lifting column, dual LiDAR, wrist-mounted RealSense D405 cameras, and a head-mounted ZED camera.
 
 The repository provides task orchestration, robot integration, perception components, and operator tools. This README covers setup, execution, verification, and recovery.
+
+## Submission guide
+
+The [Phase II submission guide](docs/EBIM_TASK3_PHASE2.md) contains the Docker build and run commands, container environment, host deployment steps, and the fields required by the official Phase II form.
+
+## Contents
+
+- [Phase II submission guide](docs/EBIM_TASK3_PHASE2.md)
+- [System requirements](#system-requirements)
+- [Running the submission](#running-the-submission)
+- [Intermediate recovery](#intermediate-recovery)
+- [Troubleshooting](#troubleshooting)
+- [Offline verification](#offline-verification)
+- [Repository layout](#repository-layout)
 
 ## System requirements
 

@@ -1,0 +1,33 @@
+name: Phase II container
+
+on:
+  push:
+    branches: [main, "codex/ebim-task3-phase2-format"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the submitted coordinator image
+        run: docker build --build-arg VCS_REF="$GITHUB_SHA" -t tmr-phase2:check .
+      - name: Verify the default command without network access
+        run: |
+          docker run --rm --network none tmr-phase2:check > /tmp/tmr-phase2-plan.json
+          python3 - <<'PY'
+          import json
+          with open('/tmp/tmr-phase2-plan.json', encoding='utf-8') as stream:
+              plan = json.load(stream)
+          assert plan['status'] == 'dry_run', plan
+          assert plan['motion_enabled'] is False, plan
+          PY
+      - name: Verify the unchanged complete-start entry can load
+        run: >-
+          docker run --rm --network none tmr-phase2:check
+          bash mission/scripts/run_complete_from_start.sh --help

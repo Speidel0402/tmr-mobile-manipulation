@@ -13,6 +13,18 @@ This guide packages the existing three-object delivery task. The original policy
 
 The submission fields below follow the [official Phase II Policy Submission form](https://github.com/EBiM-Benchmark/submissions/blob/82338edc557f82728c97612d800dfdfa1b3a54d5/.github/ISSUE_TEMPLATE/phase2-submission.yml).
 
+## Compatibility and validation status
+
+The original `base/`, `grasp/`, and `mission/` code and configuration are unchanged from the [pre-Docker revision](https://github.com/Speidel0402/tmr-mobile-manipulation/tree/2d626067904a3b847a66301c87d11833431b929a). Building this image installs its dependencies inside the image; it does not replace the robot hosts' Python, ROS, CUDA, drivers, or calibrated environment. The original bare-metal entry remains available.
+
+The container build, motion-disabled plan, launcher help, and existing offline tests have passed. A real-robot container run, timing measurements, and remote interruption/disconnection behavior have not been validated by these checks.
+
+- **Execution path:** bare-metal execution at the standard arm-host path runs arm phases locally. The container coordinator runs those same phases through the existing SSH branch. Both robot hosts must be reachable and authenticated, including arm-host self-login when Docker runs there.
+- **Timing:** task order, completion gates, motion parameters, and stage timeouts are unchanged. Control loops remain on the robot hosts, but SSH connection and output-transport delays contribute to the existing stage timeouts. Equal end-to-end latency is not guaranteed.
+- **Interruption:** stopping the container requests interruption of the coordinator and its local SSH processes. There is no remote-arm termination acknowledgement in this path; container exit alone does not prove that remote motion processes stopped.
+- **Exclusive operation:** container and bare-metal checkpoints use different paths and therefore different file locks. Never run both entries concurrently. The container name and existing checkpoint locks do not provide a shared lock across the two modes.
+- **Host deployment:** the archive commands below overwrite same-name host files. Save the existing host directories and site-specific modifications before deployment; an unchanged Git policy does not guarantee that a field machine has no uncommitted differences.
+
 ## Build and run commands
 
 Run the following on a Linux computer with Docker Engine, Git, an SSH agent, and access to the configured robot network. The operator's SSH agent must already authenticate as both `aup@172.16.0.100` and `tmr-user@172.16.0.50`; both verified host keys must be in `$HOME/.ssh/known_hosts`. No SSH private key is built into the image.
@@ -44,6 +56,22 @@ The default command prints the existing plan with `"status": "dry_run"` and `"mo
 ### 3. Deploy the same pinned files to the robot hosts
 
 Do this before starting a task, with active tasks and affected services stopped. The robot hosts must already have the vendor environments and device configuration described in [System requirements](../README.md#system-requirements). These commands install the submitted repository files at the paths expected by the existing policy; they do not install vendor software. Retain any machine-specific configuration outside the submitted files.
+
+Before an initial deployment, save the existing directories, including local calibration and configuration edits. Keep the resulting archives outside the deployment directories. On the arm host (`aup@172.16.0.100`):
+
+```bash
+tar -czf "$HOME/tmr-mobile-manipulation-before-phase2-$(date -u +%Y%m%dT%H%M%SZ).tar.gz" \
+  -C "$HOME" tmr-mobile-manipulation
+```
+
+On the base host (`tmr-user@172.16.0.50`):
+
+```bash
+tar -czf "$HOME/tmr-cycle-before-phase2-$(date -u +%Y%m%dT%H%M%SZ).tar.gz" \
+  -C "$HOME" tmr_cycle
+```
+
+Complete and retain both backups before returning to the clean pinned checkout and deploying:
 
 ```bash
 git archive HEAD | ssh aup@172.16.0.100 \
@@ -107,7 +135,59 @@ Use `Ctrl+C` in the attached terminal as described in the original operating ins
 docker stop --time 45 tmr-ebim-task3-phase2
 ```
 
-Wait for exit and verify the physical state before restarting. The original [intermediate recovery instructions](../README.md#intermediate-recovery) still apply.
+Docker sends the configured stop signal to the container and may forcibly terminate it after the timeout ([Docker stop documentation](https://docs.docker.com/reference/cli/docker/container/stop/)). This is a software-interruption request, not proof of remote robot stoppage. Confirm that the corresponding remote task/motion processes have exited and that both arms and the base are stationary before restarting or switching to fallback. The original [intermediate recovery instructions](../README.md#intermediate-recovery) still apply.
+
+## Fallback to the original bare-metal entry
+
+If container startup, SSH access, or execution is unsuccessful, the original operating method remains available. No Git rollback or Dockerfile removal is required: the original task code is identical in this packaging revision.
+
+1. On the Docker host, request shutdown and check that the named container is no longer running:
+
+   ```bash
+   docker stop --time 45 tmr-ebim-task3-phase2
+   docker ps --filter 'name=^/tmr-ebim-task3-phase2$'
+   ```
+
+   If startup failed or the `--rm` container already exited, Docker may report that it does not exist. Still perform the remote-process and physical-state checks below.
+
+2. Confirm on both robot hosts that this run's task/motion processes have exited and confirm the physical robot is stationary. If they have not, follow the existing host recovery procedure before proceeding; do not rely on container exit alone.
+3. If deployment overwrote field-specific changes, restore the saved host files while tasks and affected services are stopped. A Git checkout cannot recover uncommitted calibration or configuration that was overwritten without a backup.
+4. With the robot at the designated start, empty grippers, and healthy services, run the original command **on the arm computer at its standard path**:
+
+   ```bash
+   cd /home/aup/tmr-mobile-manipulation
+   bash mission/scripts/run_complete_from_start.sh \
+     --cup-letter B --bowl-letter A --plate-letter D
+   ```
+
+This restores the original local arm execution path. If services have stopped, use the original Windows cold-start helper first. If the robot is at an intermediate state, use the explicit recovery entry corresponding to a confirmed physical state instead of the complete-start command.
+
+Container state is stored in the Docker host's `outputs/phase2-state/`; the bare-metal entry uses `~/.tmr_three_object_delivery/` on the arm host. They do not share checkpoints or locks, and fallback does not automatically resume the container checkpoint. Keep the failed run's logs for diagnosis.
+
+## Startup and initialization time
+
+No measured full startup duration is recorded in the repository, so a fixed number of minutes cannot be promised.
+
+| Startup path | What the code establishes |
+| --- | --- |
+| Default Windows cold-start helper | The configured waits total **56 seconds** (`8 + 8 + 5 + 7 + 12 + 5 + 8 + 3`). SSH/ROS readiness checks, arm movement, gripper initialization, and spine movement take additional time. The helper has no overall elapsed-time deadline. |
+| Complete-task entry with services already running | It still obtains base control and initializes the grippers, arms, and spine. This is the original behavior, including after the cold-start helper has completed. |
+| Task preparation timeout budgets | Base readiness/control: **150 seconds**; dual-arm/gripper initialization: **180 seconds per attempt**; spine initialization: **180 seconds per attempt**. These are failure guards, not measured normal durations or a total startup estimate. |
+| Docker coordinator startup | No extra deliberate startup sleep or runtime package installation is added. Image download/build time and SSH connection time are separate from hardware initialization. |
+
+See the original [startup delay configuration](../grasp/config/system_startup.psd1), [cold-start helper](../grasp/scripts/start_tmr_system.ps1), and [task initialization](../mission/scripts/run_three_object_delivery.py). Some failed initialization reports can trigger a retry; an elapsed-time timeout aborts the stage. Do not interpret the 180-second guard as a promise that initialization normally takes three minutes.
+
+For a measured cold-start duration on the configured platform, time the existing helper after manual power-on and FCI activation are complete. Run this from the Windows repository root only when the robot is ready for initialization:
+
+```powershell
+$tmrStartupWatch = [System.Diagnostics.Stopwatch]::StartNew()
+powershell -ExecutionPolicy Bypass -File .\grasp\scripts\start_tmr_system.ps1
+$tmrStartupExitCode = $LASTEXITCODE
+$tmrStartupWatch.Stop()
+Write-Host ('Startup helper elapsed: {0:N1} minutes; exit code: {1}' -f $tmrStartupWatch.Elapsed.TotalMinutes, $tmrStartupExitCode)
+```
+
+The timer measures the helper invocation, not the complete competition task. Record success/failure and the starting hardware state together with the elapsed time before publishing a normal startup-time estimate.
 
 ## Environment and dependencies
 

@@ -1,10 +1,22 @@
-# EBiM Task 3 Phase 2 — Pre-Submission Version
+# EBiM Task 3 Phase 2 — Stage 1 Pre-Submission
 
 [![Offline tests](https://github.com/Speidel0402/tmr-mobile-manipulation/actions/workflows/offline-tests.yml/badge.svg)](https://github.com/Speidel0402/tmr-mobile-manipulation/actions/workflows/offline-tests.yml)
 
-Pre-submission package for EBiM Task 3 Phase 2, implemented on a TMR mobile manipulation platform with dual Franka FR3 arms, Robotiq grippers, a lifting column, dual LiDAR, wrist-mounted RealSense D405 cameras, and a head-mounted ZED camera.
+Pre-submission package for the completed Stage 1 portion of EBiM Task 3 Phase 2, implemented on a TMR mobile manipulation platform with dual Franka FR3 arms, Robotiq grippers, a lifting column, dual LiDAR, wrist-mounted RealSense D405 cameras, and a head-mounted ZED camera.
 
 The repository provides task orchestration, robot integration, perception components, and operator tools. This README covers setup, execution, verification, and recovery.
+
+## Stage 1 task definition
+
+Letter targets are presented as white rectangular cards containing one uppercase letter with clear local intensity contrast. The letter does not have to be black: grey or coloured lettering is supported when it remains visibly darker than the card surface. The head-mounted ZED RGB pipeline detects the card, rectifies its perspective, normalizes the glyph, matches it within the configured alphabet, and requires consistent observations across fresh frames. It does not require a depth image or an online recognition service.
+
+The destination mapping is configured through `--cup-letter`, `--bowl-letter`, and `--plate-letter` in `mission/scripts/run_three_object_delivery.py`; the complete-start wrapper is `mission/scripts/run_complete_from_start.sh`. Shared letter-search defaults are stored in `mission/config/letter_delivery.json`. Each mapping value must be a distinct single uppercase letter. The submitted label assignment is `A` for the food bowl, `B` for the cup, and `D` for the plate; the venue recognition set includes `A` through `E` so non-target cards are not forced into one of the selected classes.
+
+The execution order is fixed: cup, food bowl, then plate. After delivering the cup and food bowl, the robot returns to the pickup table for the next object. Plate delivery completes the Stage 1 run, after which the base is stopped and operator control is restored.
+
+### Complete test video
+
+[Watch the complete Stage 1 test recorded with event officials present](https://github.com/Speidel0402/tmr-mobile-manipulation/releases/download/stage1-pre-submission/ebim-task3-phase2-stage1-official-test.mp4).
 
 ## System requirements
 
@@ -169,7 +181,7 @@ The integrated task has been demonstrated on the configured robot. Offline check
 | `base/` | Mobile-base integration and supporting tools |
 | `grasp/` | Manipulation, perception, and hardware integration |
 | `mission/` | Task entry points and recovery coordination |
-| `tools/` | Camera viewers and operator utilities |
-| `docs/` | Engineering and operational reference material |
+| `tools/` | Camer viewers and operator utilities |
+| `docs/` | Engineering and operational reference materials |
 
 Task logs and checkpoints are stored under `~/.tmr_three_object_delivery/` on the arm computer. Keep the relevant run identifier and logs when reporting a problem. Do not commit passwords, SSH keys, raw sensor recordings, or temporary field-debug images.

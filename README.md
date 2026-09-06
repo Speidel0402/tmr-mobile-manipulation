@@ -1,8 +1,8 @@
-# EBiM Task 3 Phase 2 — Stage 1 Pre-Submission
+# EBiM Task 3 Phase 2 — Stage 1
 
 [![Offline tests](https://github.com/Speidel0402/tmr-mobile-manipulation/actions/workflows/offline-tests.yml/badge.svg)](https://github.com/Speidel0402/tmr-mobile-manipulation/actions/workflows/offline-tests.yml)
 
-Pre-submission package for the completed Stage 1 portion of EBiM Task 3 Phase 2, implemented on a TMR mobile manipulation platform with dual Franka FR3 arms, Robotiq grippers, a lifting column, dual LiDAR, wrist-mounted RealSense D405 cameras, and a head-mounted ZED camera.
+Submission package for the completed Stage 1 portion of EBiM Task 3 Phase 2, implemented on a TMR mobile manipulation platform with dual Franka FR3 arms, Robotiq grippers, a lifting column, dual LiDAR, wrist-mounted RealSense D405 cameras, and a head-mounted ZED camera.
 
 The repository provides task orchestration, robot integration, perception components, and operator tools. This README covers setup, execution, verification, and recovery.
 

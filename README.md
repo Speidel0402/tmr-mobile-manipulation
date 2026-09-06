@@ -39,6 +39,29 @@ Keep the configured control and camera ROS domains separate. Run real-time contr
 
 ## Running the submission
 
+### Docker build and launch
+
+The submitted container is the mission coordinator. It does not install or source ROS itself. At launch it stages the exact policy files embedded in the image into an isolated temporary directory on both robot computers. Base commands then run only in the base computer's ROS 2 Humble environment, while arm, gripper, lifting-column, and wrist-camera commands run only in the arm computer's ROS 2 Jazzy environment. The two ROS installations are never overlaid or sourced in the same process.
+
+The testbed's vendor drivers, ROS services, calibrated configuration, and passwordless SSH connectivity must already be available as described above. The container requires access to the testbed LAN at run time; it does not require Internet access or a GPU. Staging does not modify the vendor workspaces or their installed ROS packages.
+
+From a clean checkout, build the pinned submission as follows:
+
+```bash
+docker build -t edl-team-task3-phase2 .
+```
+
+With the robot at the designated start and all required services healthy, launch the submitted policy with the operator's read-only SSH configuration mounted into the container:
+
+```bash
+docker run --rm --network host \
+  --mount type=bind,src="$HOME/.ssh",dst=/root/.ssh,readonly \
+  --tmpfs /root/.tmr_three_object_delivery \
+  edl-team-task3-phase2
+```
+
+The image entrypoint is `docker/run_task3.sh`, which stages the pinned policy and then invokes `mission/scripts/run_complete_from_start.sh`. Optional letter overrides may be appended to the `docker run` command. Do not launch a second coordinator concurrently.
+
 ### A. Robot services are already running
 
 Use this entry when the robot is at the designated start, the grippers are empty, and the FR3, Robotiq, lifting-column, D405, and ZED services are healthy. The calibrated scene and device configuration must be in place, and no other autonomous task should be running.
@@ -181,7 +204,7 @@ The integrated task has been demonstrated on the configured robot. Offline check
 | `base/` | Mobile-base integration and supporting tools |
 | `grasp/` | Manipulation, perception, and hardware integration |
 | `mission/` | Task entry points and recovery coordination |
-| `tools/` | Camer viewers and operator utilities |
-| `docs/` | Engineering and operational reference materials |
+| `tools/` | Camera viewers and operator utilities |
+| `docs/` | Engineering and operational reference material |
 
 Task logs and checkpoints are stored under `~/.tmr_three_object_delivery/` on the arm computer. Keep the relevant run identifier and logs when reporting a problem. Do not commit passwords, SSH keys, raw sensor recordings, or temporary field-debug images.

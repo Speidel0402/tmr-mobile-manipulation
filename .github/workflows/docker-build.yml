@@ -1,0 +1,26 @@
+name: submission-container
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build submitted image
+        run: docker build --tag edl-team-task3-phase2 .
+      - name: Check containerized policy entry
+        run: |
+          docker run --rm --entrypoint bash edl-team-task3-phase2 \
+            -n docker/run_task3.sh
+          docker run --rm --entrypoint python edl-team-task3-phase2 \
+            mission/scripts/run_three_object_delivery.py > /tmp/task3-plan.json
+          grep -q '"motion_enabled": false' /tmp/task3-plan.json

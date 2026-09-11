@@ -5,6 +5,13 @@ policy into a disposable directory on both deployed ROS computers. It does not
 require a pre-existing `/home/aup/tmr-mobile-manipulation` checkout or a private
 `/home/aup/tmr_env.sh` file.
 
+This update was based on the deployment failure modes observed in the earlier
+task and the known equipment/configuration differences between the Shanghai
+and German testbeds. Its scope is deliberately limited to the required
+packaging, environment, SSH, and diagnostics compatibility changes. It does
+not alter the validated Task 3 strategy, calibration, motion sequence,
+perception policy, or destination mapping.
+
 ## Safe validation order
 
 1. Run `preflight`. This checks only the image payload and Python/shell syntax.

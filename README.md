@@ -41,6 +41,13 @@ Keep the configured control and camera ROS domains separate. Run real-time contr
 
 ### Docker build and launch
 
+This portability update was limited to issues identified from earlier-task
+deployment failures and the known differences between the Shanghai and German
+testbeds. Only the necessary packaging, environment discovery, SSH, and
+diagnostic behavior was changed. The validated task strategy, calibration,
+motion sequence, perception decisions, and object-to-letter mapping were not
+changed.
+
 The submitted container is the mission coordinator. It does not install or source ROS itself. At launch it stages the exact policy files embedded in the image into an isolated temporary directory on both robot computers. Base commands then run only in the base computer's ROS 2 Humble environment, while arm, gripper, lifting-column, and wrist-camera commands run only in the arm computer's ROS 2 Jazzy environment. The two ROS installations are never overlaid or sourced in the same process.
 
 The testbed's vendor drivers, ROS services, calibrated configuration, and passwordless SSH connectivity must already be available as described above. The container requires access to the testbed LAN at run time; it does not require Internet access or a GPU. Staging does not modify the vendor workspaces or their installed ROS packages. The image stages its own policy checkout and a non-secret ROS environment loader, so `/home/aup/tmr-mobile-manipulation` and `/home/aup/tmr_env.sh` are not required by the container entrypoint.

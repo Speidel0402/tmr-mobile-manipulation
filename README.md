@@ -28,12 +28,12 @@ The execution order is fixed: cup, food bowl, then plate. After delivering the c
 
 The robot must already have its vendor drivers, SDKs, ROS workspaces, calibration, and device configuration installed. Installing the offline Python dependencies alone does not provision a robot.
 
-The deployed setup uses:
+The demonstrated deployment uses the following endpoints. They are defaults,
+not files that must already exist inside the evaluator container:
 
-- Arm computer: `aup@172.16.0.100`, repository at `/home/aup/tmr-mobile-manipulation`.
-- Base computer: `tmr-user@172.16.0.50`, base package at `~/tmr_cycle`.
-- Arm environment: `~/tmr_env.sh`.
-- Key-based SSH from the arm computer to the base computer.
+- Arm computer: `aup@172.16.0.100`.
+- Base computer: `tmr-user@172.16.0.50`.
+- Evaluator-provided key-based SSH access to both computers.
 
 Keep the configured control and camera ROS domains separate. Run real-time control on the corresponding robot computer, not through an operator-side command loop. Credentials and machine-specific overrides are not included in the repository.
 
@@ -43,12 +43,18 @@ Keep the configured control and camera ROS domains separate. Run real-time contr
 
 The submitted container is the mission coordinator. It does not install or source ROS itself. At launch it stages the exact policy files embedded in the image into an isolated temporary directory on both robot computers. Base commands then run only in the base computer's ROS 2 Humble environment, while arm, gripper, lifting-column, and wrist-camera commands run only in the arm computer's ROS 2 Jazzy environment. The two ROS installations are never overlaid or sourced in the same process.
 
-The testbed's vendor drivers, ROS services, calibrated configuration, and passwordless SSH connectivity must already be available as described above. The container requires access to the testbed LAN at run time; it does not require Internet access or a GPU. Staging does not modify the vendor workspaces or their installed ROS packages.
+The testbed's vendor drivers, ROS services, calibrated configuration, and passwordless SSH connectivity must already be available as described above. The container requires access to the testbed LAN at run time; it does not require Internet access or a GPU. Staging does not modify the vendor workspaces or their installed ROS packages. The image stages its own policy checkout and a non-secret ROS environment loader, so `/home/aup/tmr-mobile-manipulation` and `/home/aup/tmr_env.sh` are not required by the container entrypoint.
 
 From a clean checkout, build the pinned submission as follows:
 
 ```bash
 docker build -t edl-team-task3-phase2 .
+```
+
+Validate the image without contacting either robot computer:
+
+```bash
+docker run --rm edl-team-task3-phase2 preflight
 ```
 
 With the robot at the designated start and all required services healthy, launch the submitted policy with the operator's read-only SSH configuration mounted into the container:
@@ -57,10 +63,34 @@ With the robot at the designated start and all required services healthy, launch
 docker run --rm --network host \
   --mount type=bind,src="$HOME/.ssh",dst=/root/.ssh,readonly \
   --tmpfs /root/.tmr_three_object_delivery \
-  edl-team-task3-phase2
+  edl-team-task3-phase2 check
 ```
 
+`check` stages the submitted files and verifies SSH, the native ROS
+environments, required services/actions, fresh wrist-camera data, base topics,
+and fresh odometry. It does not intentionally command physical motion. Only
+after it succeeds, run the policy:
+
+```bash
+docker run --rm --network host \
+  --mount type=bind,src="$HOME/.ssh",dst=/root/.ssh,readonly \
+  --tmpfs /root/.tmr_three_object_delivery \
+  edl-team-task3-phase2 execute
+```
+
+SSH credentials are evaluator-provided deployment credentials and are never
+stored in this repository or image. The container accepts the first host keys
+inside its disposable runtime and does not require a pre-populated
+`known_hosts`. Override `EBIM_ARM_HOST`, `EBIM_BASE_HOST`, or `EBIM_ARM_ENV`
+when the evaluation deployment differs from the demonstrated hosts. Setting
+`EBIM_ARM_ENV` remains supported, but its default is now the staged portable
+loader, which imports only the ROS runtime variables from an already-running
+robot process and never copies or prints the complete process environment.
+
 The image entrypoint is `docker/run_task3.sh`, which stages the pinned policy and then invokes `mission/scripts/run_complete_from_start.sh`. Optional letter overrides may be appended to the `docker run` command. Do not launch a second coordinator concurrently.
+
+Detailed evaluator diagnostics and recovery steps are in
+[`docs/EVALUATOR_TROUBLESHOOTING.md`](docs/EVALUATOR_TROUBLESHOOTING.md).
 
 ### A. Robot services are already running
 

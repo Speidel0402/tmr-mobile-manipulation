@@ -14,8 +14,9 @@ RUN apt-get update \
 WORKDIR /opt/ebim-policy
 COPY . .
 
-RUN chmod +x docker/run_task3.sh mission/scripts/run_complete_from_start.sh \
-    && bash -n docker/run_task3.sh mission/scripts/run_complete_from_start.sh \
+RUN chmod +x docker/*.sh mission/scripts/run_complete_from_start.sh \
+    && install -m 0755 docker/ssh_wrapper.sh /usr/local/bin/ssh \
+    && bash -n docker/*.sh mission/scripts/run_complete_from_start.sh \
     && python -m compileall -q base/scripts grasp/scripts mission/scripts tools
 
 ENTRYPOINT ["bash", "docker/run_task3.sh"]

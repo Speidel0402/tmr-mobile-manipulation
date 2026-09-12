@@ -1,0 +1,256 @@
+{
+  "schema_version": 1,
+  "venue": "EBiM Hamburg Task 3",
+  "source_date": "2026-09-12",
+  "host": {
+    "hostname": "companion",
+    "architecture": "aarch64",
+    "ubuntu_release": "22.04",
+    "ros_distro": "humble",
+    "python_major_minor": "3.10",
+    "kernel_contains": "rt-tegra",
+    "minimum_free_disk_gb": 2.0
+  },
+  "dds": {
+    "ROS_DOMAIN_ID": "0",
+    "ROS_LOCALHOST_ONLY_allowed": [null, "", "0"],
+    "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
+    "profile_environment_variable": "FASTRTPS_DEFAULT_PROFILES_FILE"
+  },
+  "strategy": {
+    "stage": "EBiM Task 3 Phase 2 Stage 1",
+    "source_commit": "53e4909879716868f57fa3e315ef8ded75124a90",
+    "object_order": ["cup", "bowl", "plate"],
+    "destination_mapping": {
+      "cup": "B",
+      "bowl": "A",
+      "plate": "D"
+    },
+    "table_height_profile": "shanghai_default",
+    "calibration_note": "Hamburg defaults to the Shanghai table-height profile; verify once without changing mission sequencing."
+  },
+  "streams": [
+    {
+      "name": "left_arm_joint_state",
+      "topic": "/left/franka_robot_state_broadcaster/measured_joint_states",
+      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "right_arm_joint_state",
+      "topic": "/right/franka_robot_state_broadcaster/measured_joint_states",
+      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "left_gripper_joint_state",
+      "topic": "/left/gripper/joint_states",
+      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "left_external_joint_torques",
+      "topic": "/left/franka_robot_state_broadcaster/external_joint_torques",
+      "accepted_types": [],
+      "qos": "sensor",
+      "required": false
+    },
+    {
+      "name": "left_external_wrench",
+      "topic": "/left/franka_robot_state_broadcaster/external_wrench_in_stiffness_frame",
+      "accepted_types": [],
+      "qos": "sensor",
+      "required": false
+    },
+    {
+      "name": "right_gripper_joint_state",
+      "topic": "/right/gripper/joint_states",
+      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "right_external_joint_torques",
+      "topic": "/right/franka_robot_state_broadcaster/external_joint_torques",
+      "accepted_types": [],
+      "qos": "sensor",
+      "required": false
+    },
+    {
+      "name": "right_external_wrench",
+      "topic": "/right/franka_robot_state_broadcaster/external_wrench_in_stiffness_frame",
+      "accepted_types": [],
+      "qos": "sensor",
+      "required": false
+    },
+    {
+      "name": "spine_joint_state",
+      "topic": "/spine/joint_states",
+      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "mobile_base_pose",
+      "topic": "/mobile_base/pose",
+      "accepted_types": [],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "mobile_base_twist",
+      "topic": "/mobile_base/twist",
+      "accepted_types": [],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "mobile_base_odometry",
+      "topic": "/swerve_drive_controller/odom",
+      "accepted_types": ["nav_msgs/msg/Odometry"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "mobile_base_command_output",
+      "topic": "/swerve_drive_controller/cmd_vel_out",
+      "accepted_types": ["geometry_msgs/msg/TwistStamped", "geometry_msgs/msg/Twist"],
+      "qos": "sensor",
+      "required": false
+    },
+    {
+      "name": "front_lidar",
+      "topic": "/lidar_front/scan",
+      "accepted_types": ["sensor_msgs/msg/LaserScan"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "rear_lidar",
+      "topic": "/lidar_rear/scan",
+      "accepted_types": ["sensor_msgs/msg/LaserScan"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "left_wrist_camera",
+      "topic": "/wrist_camera_left/camera/color/image_raw",
+      "accepted_types": ["sensor_msgs/msg/Image"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "right_wrist_camera",
+      "topic": "/wrist_camera_right/camera/color/image_raw",
+      "accepted_types": ["sensor_msgs/msg/Image"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "head_camera",
+      "topic": "/head_camera/zed_node/rgb/color/rect/image",
+      "accepted_types": ["sensor_msgs/msg/Image"],
+      "qos": "sensor",
+      "required": true,
+      "expected_encoding": "bgr8",
+      "expected_width": 640,
+      "expected_height": 360
+    },
+    {
+      "name": "tf",
+      "topic": "/tf",
+      "accepted_types": ["tf2_msgs/msg/TFMessage"],
+      "qos": "sensor",
+      "required": true
+    },
+    {
+      "name": "tf_static",
+      "topic": "/tf_static",
+      "accepted_types": ["tf2_msgs/msg/TFMessage"],
+      "qos": "transient_local",
+      "required": true
+    },
+    {
+      "name": "pedal_state",
+      "topic": "/pedal/state",
+      "accepted_types": [],
+      "qos": "sensor",
+      "required": false
+    },
+    {
+      "name": "teleop_pedal_mode",
+      "topic": "/teleop/pedal_mode",
+      "accepted_types": [],
+      "qos": "sensor",
+      "required": false
+    }
+  ],
+  "command_endpoints": [
+    {
+      "name": "left_arm_joint_target",
+      "topic": "/left/gello/joint_states",
+      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "required": true
+    },
+    {
+      "name": "right_arm_joint_target",
+      "topic": "/right/gello/joint_states",
+      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "required": true
+    },
+    {
+      "name": "left_gripper_target",
+      "topic": "/left/gripper/gripper_client/target_gripper_width_percent",
+      "accepted_types": [],
+      "semantics_to_confirm": [
+        "whether the numeric range is 0..1 or 0..100",
+        "whether zero means fully closed",
+        "whether commands are absolute width targets"
+      ],
+      "required": true
+    },
+    {
+      "name": "right_gripper_target",
+      "topic": "/right/gripper/gripper_client/target_gripper_width_percent",
+      "accepted_types": [],
+      "semantics_to_confirm": [
+        "whether the numeric range is 0..1 or 0..100",
+        "whether zero means fully closed",
+        "whether commands are absolute width targets"
+      ],
+      "required": true
+    },
+    {
+      "name": "mobile_base_velocity",
+      "topic": "/swerve_drive_controller/cmd_vel",
+      "accepted_types": ["geometry_msgs/msg/TwistStamped", "geometry_msgs/msg/Twist"],
+      "required": true
+    },
+    {
+      "name": "spine_height_target",
+      "topic": "/spine/target_height",
+      "accepted_types": [],
+      "semantics_to_confirm": [
+        "whether the value is an absolute target",
+        "whether the unit is metres",
+        "minimum and maximum accepted height"
+      ],
+      "required": true
+    }
+  ],
+  "legacy_interfaces_not_assumed": [
+    "/left_ik/compute_fk",
+    "/left_ik/compute_ik",
+    "/left_ik/compute_cartesian_path",
+    "/left/action_server/ptp_motion",
+    "/right/action_server/ptp_motion",
+    "/left/gripper/robotiq_gripper_controller/gripper_cmd",
+    "/right/gripper/robotiq_gripper_controller/gripper_cmd",
+    "/franka_spine_node/get_position",
+    "/franka_spine_node/move_absolute",
+    "/tmr_cycle/mission_cmd_vel"
+  ]
+}

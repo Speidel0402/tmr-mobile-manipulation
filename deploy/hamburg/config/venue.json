@@ -27,7 +27,8 @@
       "plate": "D"
     },
     "table_height_profile": "shanghai_default",
-    "calibration_note": "Hamburg defaults to the Shanghai table-height profile; verify once without changing mission sequencing."
+    "table_height_assumption": "Hamburg table height equals Shanghai table height",
+    "calibration_note": "Use the Shanghai lifting-column target and object descent profiles without a Hamburg-specific vertical offset."
   },
   "streams": [
     {

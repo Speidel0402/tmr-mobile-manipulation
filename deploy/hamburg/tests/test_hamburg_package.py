@@ -45,6 +45,10 @@ class HamburgPackageTests(unittest.TestCase):
             self.config["strategy"]["destination_mapping"],
             {"cup": "B", "bowl": "A", "plate": "D"},
         )
+        self.assertEqual(
+            self.config["strategy"]["table_height_assumption"],
+            "Hamburg table height equals Shanghai table height",
+        )
 
     def test_hamburg_executables_do_not_use_remote_or_cli_or_override_dds(self) -> None:
         paths = [ROOT / "hamburg_preflight.py", ROOT / "run_hamburg.sh"]

@@ -11,6 +11,9 @@ the validated task strategy.
 - Shanghai table-height profile as the Hamburg default.
 - Existing route, perception, grasp, placement, and return strategy files.
 
+The submitted Hamburg profile assumes the Hamburg and Shanghai pickup tables
+have the same height.  No Hamburg-specific vertical offset is added.
+
 ## Why this is separate
 
 Hamburg runs team code on the arm64 `companion` computer with Ubuntu 22.04,
@@ -90,6 +93,13 @@ motion:
 
 For a persistent venue profile, copy `interfaces-shanghai.json`, change only
 the confirmed fields, and pass `--interface-config /path/to/profile.json`.
+
+The separately runnable Shanghai object tests and the six-view grasp/release
+montage are documented in `../../docs/STANDALONE_GRASP_TESTS.md`.  They reuse
+the validated task components and always initialize the right arm into its
+raised, inward, retracted parking posture before a plate test.  They are not a
+substitute for Hamburg interface confirmation: run them in Hamburg only after
+the preflight proves the venue command adapter and joint targets.
 
 To reproduce the source audit against any later checkout:
 

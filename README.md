@@ -18,6 +18,11 @@ The execution order is fixed: cup, food bowl, then plate. After delivering the c
 
 [Watch the complete Stage 1 test recorded with event officials present](https://github.com/Speidel0402/tmr-mobile-manipulation/releases/download/stage1-pre-submission/ebim-task3-phase2-stage1-official-test.mp4).
 
+The cup, food-bowl, and plate pick/place actions are also available as
+[independently runnable object tests](docs/STANDALONE_GRASP_TESTS.md):
+
+![Task 3 Stage 1 pick/place test montage](docs/media/task3-stage1-pick-place-grid.gif)
+
 ## Hamburg venue package
 
 The evaluator-facing Hamburg deployment package is isolated under

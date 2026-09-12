@@ -19,14 +19,20 @@ import sys
 import time
 from typing import Any
 
+from interface_profile import apply_interface_profile, load_interface_profile
+
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "config" / "venue.json"
+DEFAULT_INTERFACE_CONFIG = HERE / "config" / "interfaces-shanghai.json"
 
 
-def load_config(path: Path) -> dict[str, Any]:
+def load_config(
+    path: Path, interface_path: Path = DEFAULT_INTERFACE_CONFIG
+) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as stream:
-        return json.load(stream)
+        venue = json.load(stream)
+    return apply_interface_profile(venue, load_interface_profile(interface_path))
 
 
 def fastdds_profile_report(path: Path) -> tuple[dict[str, Any], list[str]]:
@@ -290,7 +296,8 @@ def ros_graph_report(
                 "types": found_types,
                 "message_schemas": message_schemas,
                 "controller_subscriber_count": subscriber_count,
-                "semantics_to_confirm": spec.get("semantics_to_confirm", []),
+                "message_field": spec.get("message_field"),
+                "command_values": spec.get("command_values"),
             }
             command_results.append(item)
             if spec["required"] and not found_types:
@@ -300,6 +307,15 @@ def ros_graph_report(
                 errors.append(
                     f"command type mismatch for {topic}: {found_types}, expected {accepted}"
                 )
+            expected_field = spec.get("message_field")
+            if expected_field and message_schemas:
+                loaded_fields = [
+                    schema.get("fields", {}) for schema in message_schemas
+                ]
+                if not any(expected_field in fields for fields in loaded_fields):
+                    errors.append(
+                        f"command field mismatch for {topic}: expected {expected_field!r}"
+                    )
             if spec["required"] and subscriber_count < 1:
                 errors.append(f"no controller subscribes to command topic: {topic}")
 
@@ -319,15 +335,27 @@ def ros_graph_report(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--interface-config", type=Path, default=DEFAULT_INTERFACE_CONFIG
+    )
+    parser.add_argument(
+        "--print-interface-only",
+        action="store_true",
+        help="print the resolved command profile without creating a ROS node",
+    )
     parser.add_argument("--timeout-s", type=float, default=8.0)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    config = load_config(args.config)
+    config = load_config(args.config, args.interface_config)
+    if args.print_interface_only:
+        print(json.dumps(config["interface_profile"], indent=2, sort_keys=True))
+        return 0
     environment, environment_errors = environment_report(config)
     report: dict[str, Any] = {
         "schema_version": 1,
         "venue": config["venue"],
         "strategy": config["strategy"],
+        "interface_profile": config["interface_profile"],
         "motion_commanded": False,
         "environment": environment,
     }

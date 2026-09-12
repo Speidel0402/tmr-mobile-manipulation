@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "profile_name": "shanghai-validated-defaults",
+  "gripper": {
+    "left_topic": "/left/gripper/gripper_client/target_gripper_width_percent",
+    "right_topic": "/right/gripper/gripper_client/target_gripper_width_percent",
+    "message_type": "std_msgs/msg/Float32",
+    "field": "data",
+    "unit": "normalized_opening_width",
+    "minimum": 0.0,
+    "maximum": 1.0,
+    "open": 0.8,
+    "closed": 0.0,
+    "startup_left": 0.8,
+    "startup_right": 0.0,
+    "legacy_action_conversion": "width_topic_value = 0.8 - legacy_gripper_action_position",
+    "provenance": "Shanghai startup publishes std_msgs/msg/Float32 with 0.8 to open; the validated action API uses the opposite 0.0=open, 0.8=closed convention."
+  },
+  "spine": {
+    "topic": "/spine/target_height",
+    "message_type": "std_msgs/msg/Float32",
+    "field": "data",
+    "unit": "metre",
+    "absolute": true,
+    "minimum_m": 0.0,
+    "maximum_m": 0.8,
+    "home_m": 0.7,
+    "provenance": "Shanghai validated absolute home height is 0.7 m; Float32 is the Hamburg scalar-topic default and can be overridden without changing strategy code."
+  },
+  "environment_overrides": {
+    "TMR_HAMBURG_LEFT_GRIPPER_TOPIC": "gripper.left_topic",
+    "TMR_HAMBURG_RIGHT_GRIPPER_TOPIC": "gripper.right_topic",
+    "TMR_HAMBURG_GRIPPER_MESSAGE_TYPE": "gripper.message_type",
+    "TMR_HAMBURG_GRIPPER_FIELD": "gripper.field",
+    "TMR_HAMBURG_GRIPPER_OPEN": "gripper.open",
+    "TMR_HAMBURG_GRIPPER_CLOSED": "gripper.closed",
+    "TMR_HAMBURG_SPINE_TOPIC": "spine.topic",
+    "TMR_HAMBURG_SPINE_MESSAGE_TYPE": "spine.message_type",
+    "TMR_HAMBURG_SPINE_FIELD": "spine.field",
+    "TMR_HAMBURG_SPINE_HOME_M": "spine.home_m"
+  }
+}

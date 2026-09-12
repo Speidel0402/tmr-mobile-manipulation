@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
@@ -95,32 +97,67 @@ class HamburgPackageTests(unittest.TestCase):
         self.assertIn("/franka_spine_node/get_position", legacy)
 
     def test_unknown_scalar_command_contracts_are_requested_not_guessed(self) -> None:
-        commands = {
-            item["name"]: item for item in self.config["command_endpoints"]
-        }
-        for name in (
-            "left_gripper_target",
-            "right_gripper_target",
-            "spine_height_target",
-        ):
-            self.assertEqual(commands[name]["accepted_types"], [])
-            self.assertTrue(commands[name]["semantics_to_confirm"])
+        module = self._load_module("interface_profile")
+        profile = module.load_interface_profile(
+            ROOT / "config" / "interfaces-shanghai.json", environment={}
+        )
+        self.assertEqual(profile["gripper"]["message_type"], "std_msgs/msg/Float32")
+        self.assertEqual(profile["gripper"]["open"], 0.8)
+        self.assertEqual(profile["gripper"]["closed"], 0.0)
+        self.assertEqual(profile["spine"]["message_type"], "std_msgs/msg/Float32")
+        self.assertEqual(profile["spine"]["home_m"], 0.7)
         organizer_text = (ROOT / "ORGANIZER_ACTIONS.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("Before either FR3 arm is activated", organizer_text)
         self.assertIn("creates one ROS participant", organizer_text)
-        self.assertIn("std_msgs/msg/Float64", organizer_text)
+        self.assertIn("Fast venue correction", organizer_text)
 
-    def test_udp_only_fastdds_profile_validation(self) -> None:
-        import importlib.util
-
-        path = ROOT / "hamburg_preflight.py"
-        spec = importlib.util.spec_from_file_location("hamburg_preflight", path)
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
+    @staticmethod
+    def _load_module(name: str):
+        path = ROOT / f"{name}.py"
+        root_text = str(ROOT)
+        if root_text not in sys.path:
+            sys.path.insert(0, root_text)
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise AssertionError(f"cannot load {path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        return module
+
+    def test_interface_environment_override_and_resolved_commands(self) -> None:
+        profile_module = self._load_module("interface_profile")
+        profile = profile_module.load_interface_profile(
+            ROOT / "config" / "interfaces-shanghai.json",
+            environment={
+                "TMR_HAMBURG_GRIPPER_OPEN": "1.0",
+                "TMR_HAMBURG_SPINE_HOME_M": "0.65",
+            },
+        )
+        resolved = profile_module.apply_interface_profile(self.config, profile)
+        commands = {item["name"]: item for item in resolved["command_endpoints"]}
+        self.assertEqual(
+            commands["left_gripper_target"]["accepted_types"],
+            ["std_msgs/msg/Float32"],
+        )
+        self.assertEqual(commands["left_gripper_target"]["message_field"], "data")
+        self.assertEqual(
+            commands["left_gripper_target"]["command_values"]["open"], 1.0
+        )
+        self.assertEqual(
+            commands["spine_height_target"]["command_values"]["home"], 0.65
+        )
+        self.assertEqual(
+            profile["applied_environment_overrides"],
+            {
+                "TMR_HAMBURG_GRIPPER_OPEN": "1.0",
+                "TMR_HAMBURG_SPINE_HOME_M": "0.65",
+            },
+        )
+
+    def test_udp_only_fastdds_profile_validation(self) -> None:
+        module = self._load_module("hamburg_preflight")
         with tempfile.TemporaryDirectory() as directory:
             good = Path(directory) / "good.xml"
             good.write_text(

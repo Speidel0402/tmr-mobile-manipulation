@@ -1,9 +1,10 @@
 # Information requested from the Hamburg organizer
 
 The Task 3 venue document gives the gripper and spine topic names but does not
-give their ROS message types, fields, units, or value conventions.  Please do
-not change the robot controllers merely for our policy.  We first need the live
-interface contract below.
+give their ROS message types, fields, units, or value conventions.  We now use
+the Shanghai-validated scalar contract as the Hamburg default.  Please do not
+change the robot controllers merely for our policy; if the live contract is
+different, use the overrides below.
 
 ## Preferred procedure
 
@@ -25,7 +26,7 @@ Please send us the complete JSON file.  For each command topic it records:
 The check is read-only, creates one ROS participant, sends no command, and does
 not start or restart any robot service.
 
-## Values that need confirmation
+## Defaults to confirm
 
 For both gripper topics:
 
@@ -34,12 +35,11 @@ For both gripper topics:
 /right/gripper/gripper_client/target_gripper_width_percent
 ```
 
-please confirm:
+the submitted Hamburg profile assumes:
 
-1. Exact ROS message type and field name.
-2. Whether the range is `0..1` or `0..100`.
-3. Whether zero means fully closed and the maximum means fully open.
-4. Whether the command is an absolute opening-width target.
+1. `std_msgs/msg/Float32`, field `data`.
+2. Absolute normalized opening width.
+3. `0.0 = closed`, `0.8 = open` (Shanghai convention).
 
 For the spine topic:
 
@@ -47,13 +47,39 @@ For the spine topic:
 /spine/target_height
 ```
 
-please confirm:
+the submitted Hamburg profile assumes:
 
-1. Exact ROS message type and field name.
-2. Whether the command is an absolute target.
-3. Whether the unit is metres.
-4. Minimum/maximum accepted height and whether it continuously holds the last
-   target.
+1. `std_msgs/msg/Float32`, field `data`.
+2. Absolute target in metres.
+3. Shanghai home target `0.7` m.
+
+The gripper type and value direction are supported by the Shanghai launcher;
+the spine scalar message type is a Hamburg default pending the live read-only
+check.  The preflight rejects a mismatched live type or missing field before
+motion.
+
+## Fast venue correction (no policy change)
+
+Set only the values that differ, then rerun the read-only check:
+
+```bash
+export TMR_HAMBURG_GRIPPER_MESSAGE_TYPE=std_msgs/msg/Float32
+export TMR_HAMBURG_GRIPPER_FIELD=data
+export TMR_HAMBURG_GRIPPER_OPEN=0.8
+export TMR_HAMBURG_GRIPPER_CLOSED=0.0
+export TMR_HAMBURG_SPINE_MESSAGE_TYPE=std_msgs/msg/Float32
+export TMR_HAMBURG_SPINE_FIELD=data
+export TMR_HAMBURG_SPINE_HOME_M=0.7
+./deploy/hamburg/run_hamburg.sh check \
+  --output /tmp/tmr_task3_hamburg_preflight.json
+```
+
+Topic names can be changed with `TMR_HAMBURG_LEFT_GRIPPER_TOPIC`,
+`TMR_HAMBURG_RIGHT_GRIPPER_TOPIC`, and `TMR_HAMBURG_SPINE_TOPIC`.  All override
+names and their JSON paths are listed in
+`deploy/hamburg/config/interfaces-shanghai.json`.  A persistent replacement
+profile can be supplied with `--interface-config`; this changes only the venue
+adapter, not the route, perception, grasp, placement, or return strategy.
 
 If ROS CLI is used instead of the supplied check, it must be run before arm
 activation because each CLI command creates a DDS participant.  The equivalent
@@ -76,8 +102,8 @@ Please make the exact Humble/arm64 interface package available in the
 organizer-provided environment and source it before starting the team process.
 Do not provide a Jazzy-generated package or an x86_64-only binary package.
 
-As an alternative, the organizer may expose three stable relay topics using
-`std_msgs/msg/Float64`:
+Only if the native types cannot be made available to the container, the
+organizer may expose three stable relay topics using `std_msgs/msg/Float64`:
 
 ```text
 /tmr/team/left_gripper/target_width_fraction

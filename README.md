@@ -18,6 +18,15 @@ The execution order is fixed: cup, food bowl, then plate. After delivering the c
 
 [Watch the complete Stage 1 test recorded with event officials present](https://github.com/Speidel0402/tmr-mobile-manipulation/releases/download/stage1-pre-submission/ebim-task3-phase2-stage1-official-test.mp4).
 
+## Hamburg venue package
+
+The evaluator-facing Hamburg deployment package is isolated under
+[`deploy/hamburg/`](deploy/hamburg/README.md).  It targets the documented
+arm64 Ubuntu 22.04 / ROS 2 Humble companion environment and preserves the
+validated Stage 1 policy.  Gripper, lifting-column, DDS, and camera differences
+are handled through a venue profile and read-only preflight rather than by
+changing the task strategy.
+
 ## System requirements
 
 | Component | Environment | Role |

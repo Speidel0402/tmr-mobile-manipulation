@@ -23,6 +23,8 @@ jobs:
           python -m unittest discover -s deploy/hamburg/tests -v
           python -m compileall -q deploy/hamburg
           python -m json.tool deploy/hamburg/config/venue.json >/dev/null
+          python -m json.tool deploy/hamburg/config/interfaces-shanghai.json >/dev/null
+          python deploy/hamburg/hamburg_preflight.py --print-interface-only >/dev/null
           python deploy/hamburg/audit_submission.py \
             --output /tmp/tmr_task3_hamburg_source_audit.json >/dev/null
 

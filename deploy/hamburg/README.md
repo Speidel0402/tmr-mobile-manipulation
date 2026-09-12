@@ -49,6 +49,48 @@ The exact questions and optional relay contract for the organizer are in
 `ORGANIZER_ACTIONS.md`.  The preferred path is to send the generated JSON, not
 to modify a working controller stack.
 
+## Shanghai command defaults and fast overrides
+
+Hamburg initially uses the values already validated in Shanghai.  The isolated
+profile is `config/interfaces-shanghai.json`:
+
+- both gripper targets use `std_msgs/msg/Float32`, field `data`, normalized
+  opening width; `0.8` is open and `0.0` is closed;
+- the startup targets are left open and right closed;
+- the spine target uses `std_msgs/msg/Float32`, field `data`, an absolute height
+  in metres, with the Shanghai home target of `0.7` m.
+
+The gripper topic and the older action interface use opposite numeric
+directions.  The compatibility conversion is
+`width_topic_value = 0.8 - legacy_gripper_action_position`; it preserves the
+validated open/close sequence without changing the policy.
+
+If Hamburg reports a different type, field, topic, or scalar convention, set
+only the corresponding environment value before `check` (and before the final
+single-node runner):
+
+```bash
+export TMR_HAMBURG_GRIPPER_MESSAGE_TYPE=std_msgs/msg/Float32
+export TMR_HAMBURG_GRIPPER_FIELD=data
+export TMR_HAMBURG_GRIPPER_OPEN=0.8
+export TMR_HAMBURG_GRIPPER_CLOSED=0.0
+export TMR_HAMBURG_SPINE_MESSAGE_TYPE=std_msgs/msg/Float32
+export TMR_HAMBURG_SPINE_FIELD=data
+export TMR_HAMBURG_SPINE_HOME_M=0.7
+```
+
+Topic overrides are also available as
+`TMR_HAMBURG_LEFT_GRIPPER_TOPIC`, `TMR_HAMBURG_RIGHT_GRIPPER_TOPIC`, and
+`TMR_HAMBURG_SPINE_TOPIC`.  To inspect the resolved profile without ROS or
+motion:
+
+```bash
+./deploy/hamburg/run_hamburg.sh check --print-interface-only
+```
+
+For a persistent venue profile, copy `interfaces-shanghai.json`, change only
+the confirmed fields, and pass `--interface-config /path/to/profile.json`.
+
 To reproduce the source audit against any later checkout:
 
 ```bash
@@ -104,7 +146,7 @@ image before venue delivery.
 ## Current execution status
 
 `check` is reproducible and ready to use.  Physical `mission` execution remains
-locked until the live report confirms the command message types and the
-single-process manipulation state machine is ported.  This is intentional: the
-Hamburg document does not guarantee the MoveIt/PTP, Robotiq action, spine
+locked until the live report confirms the Shanghai-derived command profile and
+the single-process manipulation state machine is ported.  This is intentional:
+the Hamburg document does not guarantee the MoveIt/PTP, Robotiq action, spine
 service, or mission command-adapter interfaces used by the Shanghai scripts.

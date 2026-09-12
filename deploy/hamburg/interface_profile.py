@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Load and validate the Hamburg command-interface compatibility profile."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+import json
+import math
+import os
+from pathlib import Path
+from typing import Any
+
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_PROFILE = HERE / "config" / "interfaces-shanghai.json"
+
+
+def _set_path(value: dict[str, Any], dotted_path: str, replacement: Any) -> None:
+    target: dict[str, Any] = value
+    parts = dotted_path.split(".")
+    for part in parts[:-1]:
+        target = target[part]
+    current = target[parts[-1]]
+    if isinstance(current, float):
+        replacement = float(replacement)
+    elif isinstance(current, int):
+        replacement = int(replacement)
+    target[parts[-1]] = replacement
+
+
+def load_interface_profile(
+    path: Path = DEFAULT_PROFILE,
+    environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    environ = os.environ if environment is None else environment
+    applied = {}
+    for name, dotted_path in profile.get("environment_overrides", {}).items():
+        if name in environ and str(environ[name]).strip() != "":
+            _set_path(profile, dotted_path, environ[name])
+            applied[name] = str(environ[name])
+    profile["applied_environment_overrides"] = applied
+    validate_interface_profile(profile)
+    return profile
+
+
+def validate_interface_profile(profile: dict[str, Any]) -> None:
+    gripper = profile["gripper"]
+    spine = profile["spine"]
+    for label, section in (("gripper", gripper), ("spine", spine)):
+        if "/msg/" not in str(section["message_type"]):
+            raise ValueError(f"{label}.message_type must be a ROS message type")
+        if not str(section["field"]).strip():
+            raise ValueError(f"{label}.field must not be empty")
+    low = float(gripper["minimum"])
+    high = float(gripper["maximum"])
+    opened = float(gripper["open"])
+    closed = float(gripper["closed"])
+    if not low <= closed < opened <= high:
+        raise ValueError("gripper values must satisfy minimum <= closed < open <= maximum")
+    home = float(spine["home_m"])
+    if not math.isfinite(home) or not float(spine["minimum_m"]) <= home <= float(
+        spine["maximum_m"]
+    ):
+        raise ValueError("spine.home_m is outside the configured range")
+
+
+def apply_interface_profile(
+    venue: dict[str, Any], profile: dict[str, Any]
+) -> dict[str, Any]:
+    resolved = deepcopy(venue)
+    commands = {item["name"]: item for item in resolved["command_endpoints"]}
+    gripper = profile["gripper"]
+    spine = profile["spine"]
+    for name, topic in (
+        ("left_gripper_target", gripper["left_topic"]),
+        ("right_gripper_target", gripper["right_topic"]),
+    ):
+        commands[name].update(
+            {
+                "topic": topic,
+                "accepted_types": [gripper["message_type"]],
+                "message_field": gripper["field"],
+                "command_values": {
+                    "open": gripper["open"],
+                    "closed": gripper["closed"],
+                    "unit": gripper["unit"],
+                },
+            }
+        )
+    commands["spine_height_target"].update(
+        {
+            "topic": spine["topic"],
+            "accepted_types": [spine["message_type"]],
+            "message_field": spine["field"],
+            "command_values": {
+                "home": spine["home_m"],
+                "unit": spine["unit"],
+                "absolute": bool(spine["absolute"]),
+            },
+        }
+    )
+    resolved["interface_profile"] = profile
+    return resolved

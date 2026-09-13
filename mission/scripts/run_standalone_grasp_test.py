@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -116,6 +117,11 @@ def run(args: argparse.Namespace) -> int:
     if not args.execute:
         print(json.dumps(plan(args), ensure_ascii=False, indent=2))
         return 0
+    if os.environ.get("ROS_DISTRO", "").lower() == "humble":
+        raise MissionError(
+            "the Shanghai standalone grasp scripts cannot execute on Hamburg Humble; "
+            "use deploy/hamburg/run_hamburg.sh grasp-check for read-only observation"
+        )
     if not args.fresh_start_confirmed:
         raise MissionError(
             "--fresh-start-confirmed is required: place the selected object at the "

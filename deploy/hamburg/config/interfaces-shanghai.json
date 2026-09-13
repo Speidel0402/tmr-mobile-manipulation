@@ -52,7 +52,8 @@
   "head_camera": {
     "width": 640,
     "height": 360,
+    "zed_pub_resolution": "CUSTOM",
     "zed_pub_downscale_factor": 2.0,
-    "provenance": "Hamburg ZED HD720 output is 1280x720 by default; organizer preflight confirmed 640x360 with pub_downscale_factor:=2.0."
+    "provenance": "Hamburg ZED HD720 output is 1280x720 by default; organizer preflight confirmed 640x360 after downscaling. Current Stereolabs ROS 2 wrapper applies general.pub_downscale_factor only when general.pub_resolution is CUSTOM."
   }
 }

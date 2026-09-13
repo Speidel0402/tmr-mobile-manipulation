@@ -162,6 +162,11 @@ def qos_profile(name: str):
     raise ValueError(f"unsupported QoS profile {name!r}")
 
 
+def temporary_relay_topics(graph: dict[str, list[str]], config: dict[str, Any]) -> list[str]:
+    """Identify organizer-only bridge endpoints in a Hamburg ROS graph."""
+    return sorted(set(config.get("temporary_relay_topics_not_allowed", [])) & set(graph))
+
+
 def probe_native_spine(node: Any, config: dict[str, Any], timeout_s: float) -> tuple[dict[str, Any], list[str]]:
     """Check the native server and read position; never send an action goal."""
     service_spec = config["service_endpoints"][0]
@@ -383,9 +388,18 @@ def ros_graph_report(
             spine_report, spine_errors = probe_native_spine(node, config, timeout_s)
             errors.extend(spine_errors)
 
+        final_graph = dict(node.get_topic_names_and_types())
+        relay_topics_present = temporary_relay_topics(final_graph, config)
+        for topic in relay_topics_present:
+            errors.append(
+                f"temporary relay topic still present in Hamburg graph: {topic}; "
+                "stop organizer bridges before claiming native readiness"
+            )
+
         return {
             "node_name": node.get_fully_qualified_name(),
             "single_ros_participant": True,
+            "temporary_relay_topics_present": relay_topics_present,
             "streams": stream_results,
             "command_endpoints": command_results,
             "service_count": len(node.get_service_names_and_types()),
@@ -421,6 +435,8 @@ def main() -> int:
         "strategy": config["strategy"],
         "interface_profile": config["interface_profile"],
         "motion_commanded": False,
+        "physical_grasp_runnable": False,
+        "mission_runnable": False,
         "environment": environment,
     }
     errors = list(environment_errors)

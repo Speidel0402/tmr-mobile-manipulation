@@ -59,6 +59,23 @@ def test_dry_run_is_motion_free_and_describes_right_parking():
     assert report["table_height_profile"] == "Shanghai (assumed identical in Hamburg)"
 
 
+def test_shanghai_standalone_execution_rejects_hamburg_humble():
+    module = load_module()
+    run_args = args("cup")
+    run_args.execute = True
+    run_args.fresh_start_confirmed = True
+    with mock.patch.dict("os.environ", {"ROS_DISTRO": "humble"}), mock.patch.object(
+        module, "run_streamed_command"
+    ) as execute:
+        try:
+            module.run(run_args)
+        except module.MissionError as exc:
+            assert "Hamburg Humble" in str(exc)
+        else:
+            raise AssertionError("Shanghai standalone test must not run on Hamburg")
+    execute.assert_not_called()
+
+
 def test_each_object_reuses_the_validated_pick_component():
     module = load_module()
     config = module.build_config(args())

@@ -18,7 +18,7 @@ The execution order is fixed: cup, food bowl, then plate. After delivering the c
 
 [Watch the complete Stage 1 test recorded with event officials present](https://github.com/Speidel0402/tmr-mobile-manipulation/releases/download/stage1-pre-submission/ebim-task3-phase2-stage1-official-test.mp4).
 
-The cup, food-bowl, and plate pick/place actions are also available as
+The Shanghai cup, food-bowl, and plate pick/place actions are also available as
 [independently runnable object tests](docs/STANDALONE_GRASP_TESTS.md):
 
 ![Task 3 Stage 1 pick/place test montage](docs/media/task3-stage1-pick-place-grid.gif)
@@ -32,6 +32,8 @@ validated Stage 1 policy. The read-only preflight now checks Hamburg's native
 odometry and spine action/service directly, with an explicit ZED downscale
 requirement. Physical Hamburg mission execution remains locked until the
 Shanghai multi-process motion code is ported and validated on the venue.
+Hamburg's separate `grasp-check` can test native interfaces and cup/bowl/plate
+visibility without motion; its physical `grasp-test` remains locked as well.
 
 ## Shanghai demonstrated system requirements
 

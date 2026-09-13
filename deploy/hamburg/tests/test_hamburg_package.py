@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import importlib.util
 from pathlib import Path
@@ -28,6 +29,10 @@ class HamburgPackageTests(unittest.TestCase):
         self.assertEqual(
             self.config["dds"]["RMW_IMPLEMENTATION"], "rmw_fastrtps_cpp"
         )
+        self.assertEqual(
+            set(self.config["temporary_relay_topics_not_allowed"]),
+            {"/mobile_base/pose", "/mobile_base/twist", "/spine/joint_states", "/spine/target_height"},
+        )
 
     def test_camera_topics_and_strategy_are_preserved(self) -> None:
         streams = {item["name"]: item for item in self.config["streams"]}
@@ -36,6 +41,8 @@ class HamburgPackageTests(unittest.TestCase):
             "/head_camera/zed_node/rgb/color/rect/image",
         )
         self.assertEqual(streams["head_camera"]["qos"], "sensor")
+        self.assertEqual((streams["head_camera"]["expected_width"],
+                          streams["head_camera"]["expected_height"]), (640, 360))
         self.assertEqual(
             streams["left_wrist_camera"]["topic"],
             "/wrist_camera_left/camera/color/image_raw",
@@ -53,7 +60,8 @@ class HamburgPackageTests(unittest.TestCase):
         )
 
     def test_hamburg_executables_do_not_use_remote_or_cli_or_override_dds(self) -> None:
-        paths = [ROOT / "hamburg_preflight.py", ROOT / "spine_control.py", ROOT / "run_hamburg.sh"]
+        paths = [ROOT / "hamburg_preflight.py", ROOT / "hamburg_grasp_check.py",
+                 ROOT / "spine_control.py", ROOT / "run_hamburg.sh"]
         forbidden = (
             "subprocess",
             "paramiko",
@@ -70,6 +78,9 @@ class HamburgPackageTests(unittest.TestCase):
             for token in forbidden:
                 self.assertNotIn(token, text, f"{token!r} found in {path.name}")
         self.assertNotIn("rclpy.init(", (ROOT / "spine_control.py").read_text(encoding="utf-8"))
+        grasp_text = (ROOT / "hamburg_grasp_check.py").read_text(encoding="utf-8")
+        self.assertNotIn("create_publisher(", grasp_text)
+        self.assertNotIn("send_goal_async(", grasp_text)
 
     def test_audit_finds_submitted_runtime_incompatibilities(self) -> None:
         import importlib.util
@@ -122,12 +133,29 @@ class HamburgPackageTests(unittest.TestCase):
         self.assertEqual(profile["spine"]["position_service_type"], "franka_spine_msgs/srv/GetPosition")
         self.assertEqual(profile["spine"]["home_m"], 0.7)
         self.assertEqual((profile["head_camera"]["width"], profile["head_camera"]["height"]), (640, 360))
+        self.assertEqual(profile["head_camera"]["zed_pub_resolution"], "CUSTOM")
         organizer_text = (ROOT / "ORGANIZER_ACTIONS.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("without", organizer_text)
         self.assertIn("Float32-to-action relay", organizer_text)
         self.assertIn("MoveAbsolute", organizer_text)
+
+    def test_hamburg_native_check_detects_organizer_bridges(self) -> None:
+        preflight = self._load_module("hamburg_preflight")
+        graph = {
+            "/swerve_drive_controller/odom": ["nav_msgs/msg/Odometry"],
+            "/mobile_base/pose": ["geometry_msgs/msg/PoseStamped"],
+            "/spine/target_height": ["std_msgs/msg/Float32"],
+        }
+        self.assertEqual(
+            preflight.temporary_relay_topics(graph, self.config),
+            ["/mobile_base/pose", "/spine/target_height"],
+        )
+        self.assertEqual(
+            preflight.temporary_relay_topics({"/swerve_drive_controller/odom": ["nav_msgs/msg/Odometry"]}, self.config),
+            [],
+        )
 
     @staticmethod
     def _load_module(name: str):
@@ -189,6 +217,57 @@ class HamburgPackageTests(unittest.TestCase):
         self.assertEqual(resolved["service_endpoints"], [])
         spine = next(c for c in resolved["command_endpoints"] if c["name"] == "spine_height_target")
         self.assertEqual(spine["topic"], "/spine/target_height")
+
+    def test_grasp_observation_requires_fresh_stable_detections(self) -> None:
+        module = self._load_module("hamburg_grasp_check")
+        report, errors = module.evaluate_observations([
+            (292.0, 168.0), (293.0, 168.5), (292.5, 167.5),
+            (292.2, 168.1), (293.1, 167.9),
+        ])
+        self.assertEqual(errors, [])
+        self.assertEqual(report["valid_detections"], 5)
+        _, errors = module.evaluate_observations([None, None, (292.0, 168.0), None, None])
+        self.assertTrue(errors)
+
+    def test_grasp_wrist_image_rejects_wrong_shape(self) -> None:
+        module = self._load_module("hamburg_grasp_check")
+        image = types.SimpleNamespace(width=1280, height=720, step=3840,
+                                      encoding="rgb8", data=b"")
+        with self.assertRaises(ValueError):
+            module.decode_wrist_rgb(image)
+
+    def test_grasp_posture_targets_match_submitted_mission(self) -> None:
+        posture = json.loads((ROOT / "config" / "grasp-observation.json").read_text(encoding="utf-8"))
+        mission = ast.parse((ROOT.parents[1] / "mission" / "scripts" / "run_full_competition_cycle.py").read_text(encoding="utf-8"))
+        constants = {
+            target.id: ast.literal_eval(node.value)
+            for node in mission.body if isinstance(node, ast.Assign)
+            for target in node.targets if isinstance(target, ast.Name)
+            and target.id in {"LEFT_PICK_TOP_TARGET", "RIGHT_PARKING_TARGET"}
+        }
+        self.assertEqual(posture["left_pick_top_rad"], list(constants["LEFT_PICK_TOP_TARGET"]))
+        self.assertEqual(posture["right_parking_rad"], list(constants["RIGHT_PARKING_TARGET"]))
+        module = self._load_module("hamburg_grasp_check")
+        latest = {
+            f"{arm}_arm_joint_state": {"names": module.EXPECTED_JOINTS[arm], "position": list(posture[key])}
+            for arm, key in (("left", "left_pick_top_rad"), ("right", "right_parking_rad"))
+        }
+        report, errors = module.posture_report(latest, posture)
+        self.assertEqual(errors, [])
+        self.assertTrue(report["left"]["within_tolerance"])
+        latest["right_arm_joint_state"]["position"][0] += 0.1
+        _, errors = module.posture_report(latest, posture)
+        self.assertTrue(errors)
+
+    def test_grasp_review_descents_match_shanghai_standalone(self) -> None:
+        source = (ROOT.parents[1] / "mission" / "scripts" / "run_standalone_grasp_test.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        legacy = next(ast.literal_eval(node.value) for node in tree.body
+                      if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "OBJECTS"
+                              for target in node.targets))
+        module = self._load_module("hamburg_grasp_check")
+        self.assertEqual(module.OBJECTS, {name: spec[1] for name, spec in legacy.items()})
 
     def test_native_spine_probe_reads_state_without_sending_goal(self) -> None:
         profile_module = self._load_module("interface_profile")
@@ -347,6 +426,8 @@ class HamburgPackageTests(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("--platform=linux/arm64", dockerfile)
         self.assertIn("ros:humble-ros-base-jammy", dockerfile)
+        self.assertIn("python3-opencv", dockerfile)
+        self.assertIn("grasp/scripts/cup_rim_detector.py", dockerfile)
         self.assertNotIn("python:3.11", dockerfile)
 
 

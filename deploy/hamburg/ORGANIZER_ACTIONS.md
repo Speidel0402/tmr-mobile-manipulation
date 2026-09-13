@@ -13,9 +13,19 @@ native action name and the `MoveAbsolute` goal/result fields if they differ
 from the Shanghai package (`position`, `velocity`, `acceleration`,
 `deceleration`; result `success`, `error`, `stop_by`). The check sends no goal.
 
-For the head camera, please set the ZED's `pub_downscale_factor:=2.0` before
-running the check, or report the camera configuration that will remain stable
-during the trial. The submitted visual policy expects 640×360 `bgr8`.
+After the native preflight, please run `grasp-check --object cup`, then bowl and
+plate, with each object at the normal pickup area and both arms already in the
+configured pickup/parking posture. This check is also read-only. It reports
+joint-position error, spine height, RGB frame identity, and stability of the
+existing object-specific detector; it does not close a gripper or certify a
+grasp. Please send all three JSON reports.
+
+For the head camera, please publish 640×360 `bgr8` and report both image and
+`camera_info` dimensions. In the current Stereolabs ROS 2 wrapper, 2x
+downscaling requires `general.pub_resolution: CUSTOM` as well as
+`general.pub_downscale_factor: 2.0`; setting the factor alone under `NATIVE`
+does not change the published resolution. The camera configuration must remain
+stable during the trial.
 
 Before any physical cup, bowl, plate, or full Stage 1 test, we also need the
 Gello joint-target contract (joint order, update frequency, hold behavior,

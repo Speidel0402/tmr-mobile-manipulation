@@ -24,7 +24,11 @@ jobs:
           python -m compileall -q deploy/hamburg
           python -m json.tool deploy/hamburg/config/venue.json >/dev/null
           python -m json.tool deploy/hamburg/config/interfaces-shanghai.json >/dev/null
+          python -m json.tool deploy/hamburg/config/grasp-observation.json >/dev/null
           python deploy/hamburg/hamburg_preflight.py --print-interface-only >/dev/null
+          python deploy/hamburg/hamburg_grasp_check.py --object cup --plan >/dev/null
+          python deploy/hamburg/hamburg_grasp_check.py --object bowl --plan >/dev/null
+          python deploy/hamburg/hamburg_grasp_check.py --object plate --plan >/dev/null
           python deploy/hamburg/audit_submission.py \
             --output /tmp/tmr_task3_hamburg_source_audit.json >/dev/null
 

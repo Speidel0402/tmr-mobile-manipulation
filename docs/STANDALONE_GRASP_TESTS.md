@@ -70,9 +70,13 @@ measured joint states prove both arms are within the stored tolerance.  The
 authoritative posture is `grasp/config/grasp_initial_state.yaml`; the runner
 does not rely on a remembered visual pose or a previous process state.
 
-For Hamburg, use this test only after the venue preflight confirms the command
-adapter and the Shanghai joint targets are valid for that robot.  The Hamburg
-package does not silently reinterpret or bypass the initializer.
+These executable commands are Shanghai-only. On Hamburg Humble, the executable
+runner refuses to start because its MoveIt/PTP, Robotiq action and camera
+snapshot interfaces are not established there. Use
+`deploy/hamburg/run_hamburg.sh grasp-check --object cup|bowl|plate` for the
+read-only native interface and object-visibility check. It does not grasp or
+place an object; physical Hamburg grasp testing remains locked until a
+single-node controller and contact verification are validated on the venue.
 
 ## Demonstrated motions
 

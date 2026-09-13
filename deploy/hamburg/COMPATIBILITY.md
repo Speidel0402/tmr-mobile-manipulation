@@ -12,8 +12,9 @@ The original strategy keeps cup → B, bowl → A, and plate → D. The Septembe
 | DDS | Several launchers set domain 97/CycloneDDS | Validate organizer's domain 0/Fast DDS UDP-only environment without overriding it |
 | Base state | `/mobile_base/pose` and `/mobile_base/twist` relay | Direct `nav_msgs/msg/Odometry` from `/swerve_drive_controller/odom` in preflight |
 | Spine | Float32 target and joint-state relay assumed by old Hamburg check | Native `MoveAbsolute` action plus `GetPosition` service in preflight; a caller-owned-node action adapter exists but is not wired into a mission |
-| Head camera | Shanghai compressed path | Hamburg raw ZED topic; require 640×360 `bgr8` via ZED `pub_downscale_factor:=2.0` |
+| Head camera | Shanghai compressed path | Hamburg raw ZED topic; require 640×360 `bgr8` with ZED `general.pub_resolution: CUSTOM` and `general.pub_downscale_factor: 2.0` |
 | Arms and grippers | MoveIt/PTP, Robotiq actions in mission scripts | Hamburg Gello `JointState` and Float32 width topics are identified; motion policy not yet ported |
+| Standalone grasps | Shanghai script initializes/moves each arm and uses action feedback to prove contact | Hamburg `grasp-check` verifies a static object-specific view without motion; physical `grasp-test` remains locked |
 | Node lifecycle | Phase scripts repeatedly create ROS nodes | Read-only check is one node; mission remains locked until a one-node port exists |
 | Calibration | Shanghai table and grasp geometry | Preserved as an assumption; requires Hamburg physical acceptance |
 
@@ -23,6 +24,17 @@ spawn new processes and ROS participants during active motion, use interfaces
 not established on the testbed, and expect Shanghai camera and host services.
 Changing only the launcher or passing the new preflight would conceal those
 incompatibilities. The physical `mission` mode therefore remains fail-closed.
+
+The organizer's temporary bridges appear additive in the supplied graph: the
+native odometry, arm, gripper, LiDAR and camera streams are still present. That
+report cannot prove they remain healthy under concurrent physical motion.
+The ZED downscale does change the actual head-image dimensions, so consumers
+using absolute pixel coordinates, camera intrinsics, or a 1280x720 assumption
+must be recalibrated or run against a separate compatible stream. The old
+Shanghai wrist snapshot rejects Hamburg's `/camera/` topic path, and the old
+gripper contact classifier requires Robotiq action fields absent from the
+Float32 command topic. Running both native and relay spine command paths at
+once also risks competing goals; the Hamburg motion port must own one path.
 
 The next implementation milestone is a long-lived Humble controller that
 creates all subscriptions, publishers, service clients, and action clients

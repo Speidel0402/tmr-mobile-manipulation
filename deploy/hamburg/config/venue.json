@@ -21,6 +21,12 @@
     "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
     "profile_environment_variable": "FASTRTPS_DEFAULT_PROFILES_FILE"
   },
+  "temporary_relay_topics_not_allowed": [
+    "/mobile_base/pose",
+    "/mobile_base/twist",
+    "/spine/joint_states",
+    "/spine/target_height"
+  ],
   "strategy": {
     "stage": "EBiM Task 3 Phase 2 Stage 1",
     "source_commit": "53e4909879716868f57fa3e315ef8ded75124a90",

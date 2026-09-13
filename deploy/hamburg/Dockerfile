@@ -1,4 +1,4 @@
-FROM --platform=linux/arm64 ros:humble-ros-base-jammy
+FROM ros:humble-ros-base-jammy
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \

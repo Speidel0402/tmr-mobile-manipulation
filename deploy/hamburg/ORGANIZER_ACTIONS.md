@@ -7,7 +7,11 @@ the mission calls MoveAbsolute directly.
 Stop manual publishers to the arm, gripper and base command topics during the
 autonomous run.
 
-Run cup, bowl and plate separately so the requested utensil can be placed alone:
+Place the cup, bowl and plate in the normal pickup arrangement. Each grasp test
+resets the arms to the Shanghai-reference pickup configuration; the left wrist
+camera should then have an approximate view of all three objects. Run cup, bowl
+and plate separately, resetting the arrangement between runs. These tests do
+not move the base:
 
     ./deploy/hamburg/run_hamburg.sh check --output /tmp/hamburg-check.json
 
@@ -18,7 +22,9 @@ Run cup, bowl and plate separately so the requested utensil can be placed alone:
     ./deploy/hamburg/run_hamburg.sh grasp-test --object plate --execute \
       --output /tmp/plate-grasp.json --output-dir /tmp/plate-evidence
 
-If all three pass, inspect and run the full loop:
+If all three pass, return the robot to the official Hamburg start, then inspect
+and run the full loop including base navigation, grasp, letter observation,
+placement and return:
 
     ./deploy/hamburg/run_hamburg.sh mission
     ./deploy/hamburg/run_hamburg.sh mission --execute \

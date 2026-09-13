@@ -30,10 +30,13 @@ The evaluator-facing Hamburg deployment package is isolated under
 arm64 Ubuntu 22.04 / ROS 2 Humble companion environment and preserves the
 validated Stage 1 policy. The read-only preflight now checks Hamburg's native
 odometry and spine action/service directly, with an explicit ZED downscale
-requirement. Physical Hamburg mission execution remains locked until the
-Shanghai multi-process motion code is ported and validated on the venue.
-Hamburg's separate `grasp-check` can test native interfaces and cup/bowl/plate
-visibility without motion; its physical `grasp-test` remains locked as well.
+requirement. Hamburg provides a stationary native `grasp-test` that does not
+move the base, and a native `mission` path for the complete loop from the
+official start. These use the Hamburg single-process ROS 2 Humble path while
+the demonstrated Shanghai multi-process implementation remains preserved.
+Both default to a resolved-plan preview and require an explicit `--execute` for
+physical motion. Their initial profiles retain clearly named Shanghai reference
+values so venue-specific Hamburg geometry can be corrected independently.
 
 ## Shanghai demonstrated system requirements
 

@@ -74,9 +74,10 @@ These executable commands are Shanghai-only. On Hamburg Humble, the executable
 runner refuses to start because its MoveIt/PTP, Robotiq action and camera
 snapshot interfaces are not established there. Use
 `deploy/hamburg/run_hamburg.sh grasp-check --object cup|bowl|plate` for the
-read-only native interface and object-visibility check. It does not grasp or
-place an object; physical Hamburg grasp testing remains locked until a
-single-node controller and contact verification are validated on the venue.
+read-only native interface and object-visibility check, or use the Hamburg
+`grasp-test --object cup|bowl|plate --execute` entrypoint for the stationary
+native observation-to-grasp loop after the preflight passes. The Hamburg grasp
+test does not command the mobile base.
 
 ## Demonstrated motions
 

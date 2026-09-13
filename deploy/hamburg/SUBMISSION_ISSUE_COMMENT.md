@@ -1,28 +1,63 @@
-Hi @Speidel0402 — thank you for the Hamburg preflight and interface details.
+Dear EBiM Task 3 organizers,
 
-We have added native Hamburg execution paths for the standalone utensil tests and Stage 1. The runner uses one ROS 2 Humble node throughout active motion, consumes /swerve_drive_controller/odom directly, drives the spine through franka_spine_msgs/action/MoveAbsolute and verifies it with GetPosition, and consumes the raw wrist/head images. It does not use SSH, MoveIt/PTP, Robotiq actions, or the temporary odometry/spine relay topics.
+Thank you for providing the Hamburg preflight and interface information. We
+have prepared native ROS 2 Humble entrypoints for two staged trials. We suggest
+running the stationary observation-to-grasp checks first and proceeding to the
+complete mission only after all three utensils pass.
 
-For the arms, it sends autonomous seven-joint targets to the organizer-confirmed /{left,right}/gello/joint_states controller inputs. “gello” is the deployed topic name; no GELLO leader or manual teleoperation is used. Please stop other publishers to the arm, gripper and base command topics during the autonomous test.
+## 1. Stationary observation-to-grasp checks
 
-Please first run the three standalone observation-to-grasp loops, with only the named utensil at the pickup position:
+Please place the cup, food bowl and plate in the normal pickup arrangement.
+Before observation, each grasp test resets the arms to the pickup configuration
+used for the Shanghai trial. From this reset pose, the left wrist camera should
+have an approximate view of all three objects. Each command below observes and
+grasps only the selected utensil. This test does not move the mobile base.
 
-    ./deploy/hamburg/run_hamburg.sh check --output /tmp/hamburg-check.json
+```bash
+./deploy/hamburg/run_hamburg.sh check \
+  --output /tmp/hamburg-check.json
 
-    ./deploy/hamburg/run_hamburg.sh grasp-test --object cup --execute \
-      --output /tmp/cup-grasp.json --output-dir /tmp/cup-evidence
-    ./deploy/hamburg/run_hamburg.sh grasp-test --object bowl --execute \
-      --output /tmp/bowl-grasp.json --output-dir /tmp/bowl-evidence
-    ./deploy/hamburg/run_hamburg.sh grasp-test --object plate --execute \
-      --output /tmp/plate-grasp.json --output-dir /tmp/plate-evidence
+./deploy/hamburg/run_hamburg.sh grasp-test --object cup --execute \
+  --output /tmp/cup-grasp.json --output-dir /tmp/cup-evidence
+./deploy/hamburg/run_hamburg.sh grasp-test --object bowl --execute \
+  --output /tmp/bowl-grasp.json --output-dir /tmp/bowl-evidence
+./deploy/hamburg/run_hamburg.sh grasp-test --object plate --execute \
+  --output /tmp/plate-grasp.json --output-dir /tmp/plate-evidence
+```
 
-Each test performs a fresh 640×480 wrist observation, iterative visual correction, object-specific descent, close, lift, and contact/retention check against an empty-close baseline. It then releases the utensil and retracts. Please send the three JSON reports and aligned wrist images.
+Please reset the utensil arrangement between runs. If a trial fails, please
+send its JSON report and saved wrist image; these identify whether the problem
+is the reset view, perception, arm response or gripper feedback.
 
-If all three pass, please inspect and run the complete cup → B, bowl → A, plate → D loop:
+## 2. Complete closed-loop mission
 
-    ./deploy/hamburg/run_hamburg.sh mission
-    ./deploy/hamburg/run_hamburg.sh mission --execute \
-      --output /tmp/hamburg-stage1.json --output-dir /tmp/hamburg-stage1-evidence
+Once all three stationary grasp checks pass, please return the robot to the
+official Hamburg starting position. First inspect the resolved mission plan,
+then start the physical run:
 
-The initial profile deliberately reuses the Shanghai pickup posture, wrist calibration, 0.7 m spine target, 0.340/0.360/0.375 m object descents, and individually named route values. This should be treated as a Shanghai-reference trial on Hamburg native interfaces, not as a claim that the two venues generalize. Hamburg room length/width, clear door width and location, tabletop height/size, pickup standoff, letter spacing and each route segment may differ independently; they should not be changed with one global scale factor. The repository includes a site-config command and a phase-specific troubleshooting table so we can update only the value implicated by each report.
+```bash
+./deploy/hamburg/run_hamburg.sh mission
+./deploy/hamburg/run_hamburg.sh mission --execute \
+  --output /tmp/hamburg-stage1.json \
+  --output-dir /tmp/hamburg-stage1-evidence
+```
 
-The wrist stream remains 640×480. The full mission expects the organizer-confirmed 640×360 raw head ZED image. Letter centres are normalized and annotations use the current frame, so a pure 2× head resize needs no manual point remap, although the saved Hamburg frames are still needed to assess confidence loss. Please include the live head Image and camera_info dimensions and, if available, the arm target rate/hold and base command watchdog behavior with the results.
+The complete mission includes base navigation from the official start, pickup
+observation and grasp, head-camera letter observation, delivery and placement,
+return for the next utensil, and the final stop after the plate.
+
+For reference, the pickup and placement arrangement used during the Shanghai
+trial can be seen in the complete test video:
+
+https://github.com/Speidel0402/tmr-mobile-manipulation/releases/download/stage1-pre-submission/ebim-task3-phase2-stage1-official-test.mp4
+
+The initial Hamburg run reuses settings demonstrated in Shanghai where they are
+applicable. This is a starting reference rather than a claim that the two venues
+generalize. Hamburg room dimensions, doorway, table height and pose, official
+start, travel route and letter-station layout may all differ from Shanghai and
+must be checked independently.
+
+If the stationary grasps pass but the complete mission fails, please send the
+mission JSON, evidence images and the relevant Hamburg room/table/door
+measurements. We can then adjust the affected mission phase directly instead of
+applying one global scale factor or changing the already working grasp setup.

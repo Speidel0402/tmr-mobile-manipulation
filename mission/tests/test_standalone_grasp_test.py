@@ -56,7 +56,7 @@ def test_dry_run_is_motion_free_and_describes_right_parking():
     assert report["base_motion"] is False
     assert report["right_arm_parking_required"] is True
     assert report["initial_base_location"] == "stationary beside the pickup table"
-    assert report["table_height_profile"] == "Shanghai (assumed identical in Hamburg)"
+    assert report["table_height_profile"] == "Shanghai calibrated profile; Hamburg dimensions unverified"
 
 
 def test_shanghai_standalone_execution_rejects_hamburg_humble():

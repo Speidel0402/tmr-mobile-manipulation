@@ -23,9 +23,9 @@ standard left-arm top pose gives the left wrist camera a useful overview of the
 cup, food bowl, and plate.  The selected object detector then uses fresh frames
 from that view and aligns only the requested object.
 
-The Hamburg package assumes the table height is identical to Shanghai.  It
-therefore uses the Shanghai lifting-column target and object descent profiles
-without a Hamburg-specific vertical offset.
+Hamburg table height and room geometry have not been measured against Shanghai.
+The Shanghai lifting-column target and object descent profiles are references,
+not authorized Hamburg motion settings.
 
 ## Commands
 

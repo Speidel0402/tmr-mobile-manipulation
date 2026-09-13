@@ -63,9 +63,10 @@ contract rather than relying on a same-name or cross-distribution DDS guess.
 
 ## Venue-dependent settings
 
-The default pickup-table height and the associated arm/spine calibration are
-the same as the verified Shanghai setup. Keep those defaults unchanged for the
-evaluation table. A height change is not part of this portability patch.
+Shanghai pickup-table height and arm/spine calibration are historical
+references. The Hamburg table height and room geometry are not confirmed to
+match; do not use Shanghai motion distances there without separate measurement
+and trajectory acceptance. The Hamburg diagnostic package remains read-only.
 
 The following deployment values were used in Shanghai but should be confirmed
 on the evaluation testbed before `execute`:

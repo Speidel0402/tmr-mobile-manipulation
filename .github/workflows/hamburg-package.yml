@@ -25,6 +25,8 @@ jobs:
           python -m json.tool deploy/hamburg/config/venue.json >/dev/null
           python -m json.tool deploy/hamburg/config/interfaces-shanghai.json >/dev/null
           python -m json.tool deploy/hamburg/config/grasp-observation.json >/dev/null
+          python -m json.tool deploy/hamburg/config/geometry-observations.json >/dev/null
+          python deploy/hamburg/geometry_review.py >/dev/null
           python deploy/hamburg/hamburg_preflight.py --print-interface-only >/dev/null
           python deploy/hamburg/hamburg_grasp_check.py --object cup --plan >/dev/null
           python deploy/hamburg/hamburg_grasp_check.py --object bowl --plan >/dev/null

@@ -107,7 +107,7 @@ def plan(args: argparse.Namespace) -> dict:
         "right_arm_used_for_grasp": False,
         "right_arm_parking_required": True,
         "initial_base_location": "stationary beside the pickup table",
-        "table_height_profile": "Shanghai (assumed identical in Hamburg)",
+        "table_height_profile": "Shanghai calibrated profile; Hamburg dimensions unverified",
         "calibration_origin": "Shanghai validated Stage 1",
     }
 

@@ -11,6 +11,7 @@ import argparse
 from collections import deque
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import time
@@ -92,6 +93,24 @@ def evaluate_observations(points: list[tuple[float, float] | None]) -> tuple[dic
     }, errors
 
 
+def save_observation_image(bgr: Any, object_name: str,
+                           point: tuple[float, float] | None, output: Path) -> None:
+    """Write the actual wrist frame with the detected rim point for review."""
+    import cv2
+
+    annotated = bgr.copy()
+    label = f"{object_name}: {'rim point' if point is not None else 'not detected'}"
+    cv2.rectangle(annotated, (0, 0), (annotated.shape[1] - 1, 38), (0, 0, 0), -1)
+    cv2.putText(annotated, label, (10, 26), cv2.FONT_HERSHEY_SIMPLEX,
+                0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    if point is not None:
+        x, y = (int(round(value)) for value in point)
+        cv2.drawMarker(annotated, (x, y), (0, 0, 255), cv2.MARKER_CROSS, 24, 2)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(output), annotated):
+        raise OSError(f"could not save annotated wrist frame to {output}")
+
+
 def posture_report(latest: dict[str, Any], posture: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """Compare observed joints with the static Shanghai pickup view."""
     errors: list[str] = []
@@ -118,7 +137,8 @@ def posture_report(latest: dict[str, Any], posture: dict[str, Any]) -> tuple[dic
     return report, errors
 
 
-def run_check(config: dict[str, Any], object_name: str, timeout_s: float) -> dict[str, Any]:
+def run_check(config: dict[str, Any], object_name: str, timeout_s: float,
+              posture_config_path: Path, image_output: Path | None = None) -> dict[str, Any]:
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
@@ -128,7 +148,7 @@ def run_check(config: dict[str, Any], object_name: str, timeout_s: float) -> dic
         raise ValueError("Hamburg grasp check requires the native spine action profile")
     streams = {item["name"]: item for item in config["streams"]}
     commands = {item["name"]: item for item in config["command_endpoints"]}
-    posture_config = json.loads(POSTURE_CONFIG.read_text(encoding="utf-8"))
+    posture_config = json.loads(posture_config_path.read_text(encoding="utf-8"))
     rclpy.init(args=None)
     node = Node("tmr_task3_hamburg_grasp_check")
     latest: dict[str, Any] = {}
@@ -199,10 +219,13 @@ def run_check(config: dict[str, Any], object_name: str, timeout_s: float) -> dic
         points: list[tuple[float, float] | None] = []
         detector_errors: list[str] = []
         detector_ms: list[float] = []
+        last_bgr = None
         for _stamp, message in frames:
             try:
                 t0 = time.monotonic()
-                point = detect_object(object_name, decode_wrist_rgb(message))
+                bgr = decode_wrist_rgb(message)
+                last_bgr = bgr
+                point = detect_object(object_name, bgr)
                 detector_ms.append(round((time.monotonic() - t0) * 1000.0, 2))
                 points.append(point)
             except Exception as exc:
@@ -210,15 +233,23 @@ def run_check(config: dict[str, Any], object_name: str, timeout_s: float) -> dic
                 detector_errors.append(f"{type(exc).__name__}: {exc}")
         detection, detection_errors = evaluate_observations(points)
         errors.extend(detection_errors)
+        image_path = None
+        if image_output is not None and last_bgr is not None:
+            try:
+                save_observation_image(last_bgr, object_name, points[-1], image_output)
+                image_path = str(image_output)
+            except (OSError, ValueError) as exc:
+                errors.append(f"annotated wrist image unavailable: {exc}")
         return {
             "schema_version": 1, "venue": config["venue"], "object": object_name,
             "status": "observation_ready" if not errors else "blocked",
             "motion_commanded": False, "grasp_executed": False,
             "physical_grasp_runnable": False,
             "single_ros_participant": True, "duration_s": round(time.monotonic() - started, 3),
-            "streams": latest, "posture": posture,
+            "streams": latest, "posture_config": str(posture_config_path), "posture": posture,
             "controller_subscriber_counts": subscriber_counts,
             "native_spine": spine, "detection": detection,
+            "annotated_wrist_image": image_path,
             "detector_errors": detector_errors, "detector_ms": detector_ms,
             "errors": errors,
         }
@@ -232,7 +263,12 @@ def main() -> int:
     parser.add_argument("--object", choices=tuple(OBJECTS), required=True)
     parser.add_argument("--plan", action="store_true", help="print the read-only check plan without ROS")
     parser.add_argument("--timeout-s", type=float, default=8.0)
+    parser.add_argument("--posture-config", type=Path,
+                        default=Path(os.environ.get("TMR_HAMBURG_GRASP_POSTURE_CONFIG", str(POSTURE_CONFIG))),
+                        help="approved observation posture; Shanghai reference is the default")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--image-output", type=Path,
+                        help="save the real left-wrist frame annotated with the object rim point")
     args = parser.parse_args()
     if args.timeout_s <= 0:
         parser.error("--timeout-s must be positive")
@@ -240,6 +276,7 @@ def main() -> int:
     if args.plan:
         report = {"object": args.object, "operation": "Hamburg native grasp observation",
                   "legacy_descent_m_for_review": OBJECTS[args.object],
+                  "posture_config": str(args.posture_config),
                   "motion_commanded": False, "grasp_executed": False,
                   "physical_grasp_runnable": False,
                   "requires": ["single Humble companion", "native spine action/service",
@@ -252,7 +289,8 @@ def main() -> int:
                       "environment": environment, "errors": errors}
         else:
             try:
-                report = run_check(config, args.object, args.timeout_s)
+                report = run_check(config, args.object, args.timeout_s, args.posture_config,
+                                   args.image_output)
             except Exception as exc:
                 report = {"object": args.object, "status": "blocked", "motion_commanded": False,
                           "grasp_executed": False, "physical_grasp_runnable": False,

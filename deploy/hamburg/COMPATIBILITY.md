@@ -16,7 +16,7 @@ The original strategy keeps cup → B, bowl → A, and plate → D. The Septembe
 | Arms and grippers | MoveIt/PTP, Robotiq actions in mission scripts | Hamburg Gello `JointState` and Float32 width topics are identified; motion policy not yet ported |
 | Standalone grasps | Shanghai script initializes/moves each arm and uses action feedback to prove contact | Hamburg `grasp-check` verifies a static object-specific view from the 640×480 left wrist camera without motion or head-ZED dependency; physical `grasp-test` remains locked |
 | Node lifecycle | Phase scripts repeatedly create ROS nodes | Read-only check is one node; mission remains locked until a one-node port exists |
-| Calibration | Shanghai table and grasp geometry | Preserved as an assumption; requires Hamburg physical acceptance |
+| Calibration and room geometry | Shanghai table height, pickup pose, doorway and route distances | Treat as references only; measure Hamburg table/room/door and approve new paths before motion |
 
 The existing `mission/scripts/run_three_object_delivery.py`, object pick
 scripts, and base scripts cannot be launched from Hamburg unchanged. They
@@ -35,6 +35,13 @@ Shanghai wrist snapshot rejects Hamburg's `/camera/` topic path, and the old
 gripper contact classifier requires Robotiq action fields absent from the
 Float32 command topic. Running both native and relay spine command paths at
 once also risks competing goals; the Hamburg motion port must own one path.
+
+Shanghai's route values such as `initial_forward_m: 0.85`,
+`before_door_m: 0.50`, `forward_from_before_door_m: 1.20`, and start-relative
+table/letter positions are not Hamburg room dimensions. They cannot be scaled
+from a single room-length ratio; Hamburg needs a measured map, door clearance,
+pickup pose, and fresh route validation. The 0.7 m spine home and object
+descents are not portable table-height corrections.
 
 The next implementation milestone is a long-lived Humble controller that
 creates all subscriptions, publishers, service clients, and action clients

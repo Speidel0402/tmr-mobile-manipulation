@@ -48,8 +48,9 @@ prove motion semantics.
 | Grippers | Float32 width topics, 0.8 open / 0.0 closed | Organizer confirms endpoints/convention; old action uses the opposite numeric direction and its stall/result fields are absent from a Float32 publication |
 | Wrist RGB | `/wrist_camera_left/camera/color/image_raw`, 640x480 `rgb8` | Dimensions match Shanghai detector gates, but old HTTP snapshot validator expects `/wrist_camera_left/color/image_raw`; mount, intrinsics and visual targets remain unverified |
 | Head RGB | `/head_camera/zed_node/rgb/color/rect/image`, 640x360 `bgr8` after 2x downscale | Required by the full preflight/mission path, not standalone `grasp-check`. Current ZED wrapper needs `general.pub_resolution: CUSTOM` for `general.pub_downscale_factor: 2.0` to apply; image and camera_info must be verified. Old letter-search uses a different compressed topic and pixel assumptions may change |
-| Pickup posture | left pick-top and right parking targets copied from `grasp_initial_state.yaml` | Static tests prove source consistency; the venue has not accepted their clearance or joint-order semantics |
-| Object descent | cup 0.340 m, bowl 0.360 m, plate 0.375 m | Preserved only as review values. No Hamburg motion uses them until table geometry and arm path are verified |
+| Pickup posture | left pick-top and right parking targets copied from `grasp_initial_state.yaml` | Reference only; the venue has not accepted their clearance or joint-order semantics against a different table |
+| Object descent | cup 0.340 m, bowl 0.360 m, plate 0.375 m | Shanghai reference values only. No Hamburg motion uses them until table height and arm path are measured and approved |
+| Room/route geometry | Shanghai starts with 0.85 m initial forward, 0.50 m before the door and 1.20 m through it; `route.yaml` also has start-relative table and inspection positions | Hamburg room size, door opening and table location are unknown; these distances cannot be transferred or uniformly scaled |
 
 ## Effect of the organizer's temporary glue
 
@@ -105,8 +106,10 @@ It would need separate scaling/calibration if enabled later.
 
 1. Run the updated native `check` without organizer relays and record the
    action/service schema, fresh streams, image metadata and errors.
-2. Run read-only `grasp-check` separately for cup, bowl and plate at the
-   organizer-approved pickup pose. Its result is deliberately labeled
+2. Measure Hamburg room, door and table geometry. Run read-only `grasp-check`
+   separately for cup, bowl and plate at an organizer-approved stationary
+   observation pose, without moving to Shanghai's pose solely for this check.
+   Its result is deliberately labeled
    `grasp_executed: false`.
 3. Obtain Gello joint command order, limits, rate/hold/watchdog and fault
    behavior; gripper joint-state mapping and contact evidence; base command

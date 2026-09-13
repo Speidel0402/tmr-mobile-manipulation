@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "measurement_unit": "metre",
+  "measurement_reference": "room dimensions and floor-to-table-top height on the Hamburg testbed",
+  "hamburg": {
+    "room_length_m": null,
+    "room_width_m": null,
+    "door_clear_width_m": null,
+    "table_top_height_m": null,
+    "table_length_m": null,
+    "table_width_m": null,
+    "pickup_base_to_table_edge_m": null
+  },
+  "shanghai_reference_table_top_height_m": null,
+  "notes": "Fill measured values only. No motion target is calculated from this file."
+}

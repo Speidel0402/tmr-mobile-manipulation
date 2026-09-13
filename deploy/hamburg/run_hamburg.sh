@@ -12,6 +12,20 @@ case "${MODE}" in
   grasp-check)
     exec python3 "${SCRIPT_DIR}/hamburg_grasp_check.py" "$@"
     ;;
+  grasp-check-all)
+    output_dir="${1:-/tmp/tmr_hamburg_grasp_checks}"
+    mkdir -p -- "${output_dir}"
+    failed=0
+    for object in cup bowl plate; do
+      python3 "${SCRIPT_DIR}/hamburg_grasp_check.py" \
+        --object "${object}" --output "${output_dir}/${object}.json" \
+        --image-output "${output_dir}/${object}.png" || failed=1
+    done
+    exit "${failed}"
+    ;;
+  geometry-review)
+    exec python3 "${SCRIPT_DIR}/geometry_review.py" "$@"
+    ;;
   grasp-test)
     echo "Hamburg physical grasp test is locked: native Gello motion planning and gripper contact feedback are not yet validated." >&2
     echo "Use grasp-check for a read-only object-specific camera and interface check." >&2
@@ -23,7 +37,7 @@ case "${MODE}" in
     exit 3
     ;;
   *)
-    echo "usage: $0 {check|grasp-check|grasp-test|mission} [arguments]" >&2
+    echo "usage: $0 {check|grasp-check|grasp-check-all|geometry-review|grasp-test|mission} [arguments]" >&2
     exit 64
     ;;
 esac

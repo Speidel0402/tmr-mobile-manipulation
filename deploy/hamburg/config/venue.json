@@ -40,9 +40,9 @@
       "bowl": "A",
       "plate": "D"
     },
-    "table_height_profile": "shanghai_default",
-    "table_height_assumption": "Hamburg table height equals Shanghai table height",
-    "calibration_note": "Use the Shanghai lifting-column target and object descent profiles without a Hamburg-specific vertical offset."
+    "table_height_profile": "hamburg_unmeasured",
+    "table_height_assumption": "Hamburg and Shanghai table heights must be measured separately; no equivalence is assumed",
+    "calibration_note": "Shanghai spine height and object descents are reference values only. Measure Hamburg table height and approve an object-specific clearance/trajectory before any motion."
   },
   "streams": [
     {

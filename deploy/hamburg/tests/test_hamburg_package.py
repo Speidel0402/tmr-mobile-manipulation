@@ -56,7 +56,7 @@ class HamburgPackageTests(unittest.TestCase):
         )
         self.assertEqual(
             self.config["strategy"]["table_height_assumption"],
-            "Hamburg table height equals Shanghai table height",
+            "Hamburg and Shanghai table heights must be measured separately; no equivalence is assumed",
         )
 
     def test_hamburg_executables_do_not_use_remote_or_cli_or_override_dds(self) -> None:
@@ -238,6 +238,19 @@ class HamburgPackageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             module.decode_wrist_rgb(image)
 
+    def test_grasp_check_saves_reviewable_annotated_wrist_frame(self) -> None:
+        import cv2
+        import numpy as np
+
+        module = self._load_module("hamburg_grasp_check")
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "cup.png"
+            module.save_observation_image(np.zeros((480, 640, 3), dtype=np.uint8),
+                                          "cup", (292.5, 168.0), output)
+            image = cv2.imread(str(output))
+            self.assertEqual(image.shape[:2], (480, 640))
+            self.assertGreater(int(image[168, 292, 2]), int(image[168, 292, 0]))
+
     def test_grasp_posture_targets_match_submitted_mission(self) -> None:
         posture = json.loads((ROOT / "config" / "grasp-observation.json").read_text(encoding="utf-8"))
         mission = ast.parse((ROOT.parents[1] / "mission" / "scripts" / "run_full_competition_cycle.py").read_text(encoding="utf-8"))
@@ -270,6 +283,23 @@ class HamburgPackageTests(unittest.TestCase):
                               for target in node.targets))
         module = self._load_module("hamburg_grasp_check")
         self.assertEqual(module.OBJECTS, {name: spec[1] for name, spec in legacy.items()})
+
+    def test_geometry_review_keeps_shanghai_values_as_references(self) -> None:
+        module = self._load_module("geometry_review")
+        template = json.loads((ROOT / "config" / "geometry-observations.json").read_text(encoding="utf-8"))
+        missing = module.review(template)
+        self.assertEqual(missing["status"], "needs_measurements")
+        self.assertFalse(missing["ready_for_motion"])
+        self.assertIn("table_top_height_m", missing["missing_hamburg_measurements"])
+        template["hamburg"].update({field: 1.0 for field in module.REQUIRED})
+        template["hamburg"]["table_top_height_m"] = 0.78
+        template["shanghai_reference_table_top_height_m"] = 0.75
+        measured = module.review(template)
+        self.assertEqual(measured["table_top_delta_hamburg_minus_shanghai_m"], 0.03)
+        self.assertFalse(measured["ready_for_motion"])
+        template["hamburg"]["room_length_m"] = -1.0
+        with self.assertRaises(ValueError):
+            module.review(template)
 
     def test_native_spine_probe_reads_state_without_sending_goal(self) -> None:
         profile_module = self._load_module("interface_profile")

@@ -3,8 +3,9 @@
 This directory contains the Hamburg interface check and the starting point for
 porting Stage 1 to the organizer's single `companion` computer (aarch64,
 Ubuntu 22.04, ROS 2 Humble). The preserved object
-order is cup, bowl, plate, with destinations B, A, D. The Shanghai table-height
-assumption is unchanged and still needs venue acceptance.
+order is cup, bowl, plate, with destinations B, A, D. Hamburg room dimensions,
+door clearance and table height must be measured; Shanghai geometry is not
+assumed to match.
 
 ## Current status
 
@@ -38,7 +39,7 @@ Base state comes directly from `/swerve_drive_controller/odom` as
 base-command topics remain as documented in `config/venue.json`.
 
 The gripper profile retains `std_msgs/msg/Float32` with `0.8 = open` and
-`0.0 = closed`. The spine home target remains 0.7 m. Those values come from
+`0.0 = closed`. The Shanghai spine home reference is 0.7 m. Those values come from
 the Shanghai submission and organizer's interface report; the check itself
 sends no command and cannot validate grasp mechanics or calibration.
 
@@ -110,12 +111,15 @@ fresh left-wrist frames with stable object-specific rim detections. For example:
 
 ```bash
 ./deploy/hamburg/run_hamburg.sh grasp-check --object cup \
-  --output /tmp/hamburg_cup_observation.json
+  --output /tmp/hamburg_cup_observation.json \
+  --image-output /tmp/hamburg_cup_observation.png
 ```
 
 The result explicitly records `grasp_executed: false` and
 `motion_commanded: false`; `observation_ready` means only that this static view
-was detectable. It uses the 640×480 left wrist camera only and does not require
+was detectable. The annotated PNG marks the detected rim on the actual wrist
+frame. `grasp-check-all /tmp/hamburg_grasps` runs all three detectors and saves
+one JSON and one annotated PNG per object. It uses the 640×480 left wrist camera only and does not require
 the head ZED's 640×360 output. The selected object, table height, joint targets, and visual
 calibration still require physical acceptance. `grasp-test` refuses motion.
 The separately runnable Shanghai grasp tests in
@@ -125,3 +129,6 @@ A physical Hamburg grasp test and full Stage 1 trial require a single-node motio
 port, calibration review, and an organizer-supervised run. See
 `COMPATIBILITY.md` and `ORGANIZER_ACTIONS.md` for the remaining work.
 The evidence and cross-module/domain audit are in `INTEGRATION_AUDIT.md`.
+For the Shanghai-reference-first trial order, room/table measurements,
+troubleshooting, and fast report-driven overrides, see
+`TRIAL_AND_TROUBLESHOOTING.md`.

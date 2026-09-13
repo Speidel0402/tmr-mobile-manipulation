@@ -435,8 +435,8 @@ def main() -> int:
         "strategy": config["strategy"],
         "interface_profile": config["interface_profile"],
         "motion_commanded": False,
-        "physical_grasp_runnable": False,
-        "mission_runnable": False,
+        "physical_grasp_entrypoint": "run_hamburg.sh grasp-test",
+        "mission_entrypoint": "run_hamburg.sh mission",
         "environment": environment,
     }
     errors = list(environment_errors)
@@ -448,6 +448,8 @@ def main() -> int:
         except Exception as exc:
             errors.append(f"ROS graph check failed: {exc!r}")
     report["status"] = "ready" if not errors else "blocked"
+    report["physical_grasp_runnable"] = not errors
+    report["mission_runnable"] = not errors
     report["errors"] = errors
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print(rendered, flush=True)

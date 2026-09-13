@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "profile_name": "hamburg_native_arm_control_with_shanghai_grasp_reference",
+  "parameter_scope": {
+    "reused_from_shanghai": [
+      "left pickup-top and right parking joint targets",
+      "left tool orientation at pickup top",
+      "640x480 wrist image profile and object-specific RGB detectors",
+      "right-rim image target and calibrated base-XY/image Jacobian",
+      "cup/bowl/plate order and 0.340/0.360/0.375 m initial descents",
+      "0.7 m initial spine target",
+      "gripper convention 0.8=open and 0.0=closed"
+    ],
+    "hamburg_specific_not_generalized": [
+      "room length and width",
+      "door location and clear width",
+      "tabletop height, length and width",
+      "base-to-table-edge pickup standoff",
+      "letter-card positions and route segment distances",
+      "live wrist/head image quality and calibration validity"
+    ]
+  },
+  "topics": {
+    "left_joint_state": "/left/franka_robot_state_broadcaster/measured_joint_states",
+    "right_joint_state": "/right/franka_robot_state_broadcaster/measured_joint_states",
+    "left_joint_target": "/left/gello/joint_states",
+    "right_joint_target": "/right/gello/joint_states",
+    "left_gripper_state": "/left/gripper/joint_states",
+    "left_gripper_target": "/left/gripper/gripper_client/target_gripper_width_percent",
+    "left_wrist_image": "/wrist_camera_left/camera/color/image_raw"
+  },
+  "arm_command_interface": {
+    "description": "native autonomous arm joint-target input; topic name is retained from the deployed controller and does not require a GELLO leader",
+    "message_type": "sensor_msgs/msg/JointState",
+    "units": "radian",
+    "control_mode": "continuous joint target consumed by the deployed Franka joint-impedance controller"
+  },
+  "joint_names": {
+    "left": [
+      "left_fr3v2_joint1", "left_fr3v2_joint2", "left_fr3v2_joint3",
+      "left_fr3v2_joint4", "left_fr3v2_joint5", "left_fr3v2_joint6",
+      "left_fr3v2_joint7"
+    ],
+    "right": [
+      "right_fr3v2_joint1", "right_fr3v2_joint2", "right_fr3v2_joint3",
+      "right_fr3v2_joint4", "right_fr3v2_joint5", "right_fr3v2_joint6",
+      "right_fr3v2_joint7"
+    ]
+  },
+  "posture": {
+    "left_pick_top_rad": [
+      -1.71976900100708, -1.6329213380813599, 1.8240526914596558,
+      -2.447446823120117, 2.177191972732544, 0.8496646285057068,
+      -3.05077862739563
+    ],
+    "right_parking_rad": [
+      -1.3082223883915827, -1.221499396341589, 0.4977228788663176,
+      -2.8806021162096016, -0.4502475342569809, 2.1810914572975415,
+      1.1374866925775369
+    ],
+    "left_tool_quaternion_xyzw": [
+      0.6965795194017754, 0.7171679017330287,
+      0.006319729771827597, 0.020180061680965224
+    ]
+  },
+  "motion": {
+    "publish_rate_hz": 50.0,
+    "maximum_joint_velocity_rad_s": 0.06,
+    "maximum_following_error_rad": 0.16,
+    "endpoint_tolerance_rad": 0.012,
+    "endpoint_timeout_s": 8.0,
+    "cartesian_waypoint_step_m": 0.010,
+    "maximum_visual_xy_travel_m": 0.16,
+    "maximum_visual_step_m": 0.020
+  },
+  "vision": {
+    "width": 640,
+    "height": 480,
+    "encodings": ["rgb8", "bgr8"],
+    "target_right_rim_px": [292.5, 167.921509],
+    "maximum_stable_spread_px": 8.0,
+    "alignment_tolerance_px": 8.0,
+    "maximum_iterations": 12,
+    "shanghai_base_xy_to_image_uv": [
+      [-773.8408883365554, -206.6096777663516],
+      [555.7475627583005, 1862.6534184570041]
+    ]
+  },
+  "spine": {
+    "initial_target_m": 0.7
+  },
+  "gripper": {
+    "open": 0.8,
+    "closed": 0.0,
+    "command_duration_s": 1.5,
+    "settle_timeout_s": 5.0,
+    "settled_spread": 0.002,
+    "minimum_contact_delta_from_empty_closed": 0.001
+  },
+  "objects": {
+    "cup": {"descent_m": 0.340, "destination": "B"},
+    "bowl": {"descent_m": 0.360, "destination": "A"},
+    "plate": {"descent_m": 0.375, "destination": "D"}
+  }
+}

@@ -1,134 +1,152 @@
 # EBiM Task 3 — Hamburg deployment
 
-This directory contains the Hamburg interface check and the starting point for
-porting Stage 1 to the organizer's single `companion` computer (aarch64,
-Ubuntu 22.04, ROS 2 Humble). The preserved object
-order is cup, bowl, plate, with destinations B, A, D. Hamburg room dimensions,
-door clearance and table height must be measured; Shanghai geometry is not
-assumed to match.
+This directory provides native Hamburg entrypoints for the organizer's single
+aarch64 Ubuntu 22.04 / ROS 2 Humble companion. It does not start robot drivers,
+change the DDS domain, use SSH, or require the organizer's temporary bridges.
 
-## Current status
+The trial order is deliberately staged:
 
-`check` is read-only. It has been updated to inspect Hamburg's native interfaces
-without organizer relay nodes. `mission` remains locked: the submitted Shanghai
-pickup, transport, and placement programs create ROS participants during motion
-and require MoveIt/PTP and camera services not established by the Hamburg
-preflight. A passing interface check does **not** authorize Stage 1 motion.
+1. native interface check;
+2. stationary wrist observation for cup, bowl, then plate;
+3. autonomous observation → visual correction → grasp → lift → contact check →
+   release for each utensil;
+4. the one-node cup → B, bowl → A, plate → D mission.
 
-## Native interface profile
+`grasp-test` and `mission` are runnable. Without `--execute` they print the
+resolved plan; with `--execute` they use the physical interfaces.
 
-`config/interfaces-shanghai.json` now defaults to the organizer-confirmed
-`franka_spine_msgs/action/MoveAbsolute` action type at
-`/franka_spine_node/move_absolute` and the
-`franka_spine_msgs/srv/GetPosition` service at
-`/franka_spine_node/get_position`. The organizer confirmed the service name,
-but the action name and service type come from the Shanghai source and still
-need a native Hamburg check. The service is queried without sending a goal.
-The `franka_spine_msgs` Python package must be built for and sourced into the
-same Humble environment as the team process; the generic Docker image does not
-contain that vendor interface package.
+## Native control path
 
-`spine_control.py` contains the native motion adapter for a caller-owned ROS
-node. It creates its action and service clients at construction, checks the
-target range and action result, and verifies the measured final height. The
-mission does not yet call this adapter.
+| Component | Hamburg path used by these entrypoints |
+| --- | --- |
+| Arm state | `/{left,right}/franka_robot_state_broadcaster/measured_joint_states` |
+| Arm command | `/{left,right}/gello/joint_states`, `sensor_msgs/JointState` |
+| Gripper | native Float32 width target, `0.8=open`, `0.0=closed`, plus gripper joint feedback |
+| Spine | `/franka_spine_node/move_absolute` and `/franka_spine_node/get_position` |
+| Base | direct `/swerve_drive_controller/odom` and `/swerve_drive_controller/cmd_vel` |
+| Wrist RGB | raw 640×480 left camera; grasp observation and alignment |
+| Head RGB | raw 640×360 ZED; letter recognition and centering in the full mission |
+| Range | front and rear native LaserScan streams |
 
-Base state comes directly from `/swerve_drive_controller/odom` as
-`nav_msgs/msg/Odometry`. No `/mobile_base/pose`, `/mobile_base/twist`, or
-`/spine/joint_states` relay is required. Arm, gripper, LiDAR, camera, TF, and
-base-command topics remain as documented in `config/venue.json`.
+The arm command topics contain `gello` in the deployed controller's names. The
+new code does not use a GELLO leader or manual teleoperation. It computes
+autonomous FR3v2 targets and continuously streams them to the organizer-confirmed
+joint-impedance controller input. The official FR3v2 kinematic chain and joint
+limits are applied locally, so the Hamburg path does not depend on MoveIt, PTP,
+IK/FK services, or Robotiq actions.
 
-The gripper profile retains `std_msgs/msg/Float32` with `0.8 = open` and
-`0.0 = closed`. The Shanghai spine home reference is 0.7 m. Those values come from
-the Shanghai submission and organizer's interface report; the check itself
-sends no command and cannot validate grasp mechanics or calibration.
+`hamburg_grasp_cycle.py` and `hamburg_mission.py` each create one ROS node and
+construct all subscriptions, publishers, action clients, and service clients
+before active motion. They keep publishing arm hold targets while the base,
+vision, and gripper loops run. No phase starts a child process or creates a new
+DDS participant.
 
-The head-camera contract requires 640×360 `bgr8` at
-`/head_camera/zed_node/rgb/color/rect/image`. The organizer obtained that size
-from its HD720 ZED using 2x downscaling. In the current Stereolabs ROS 2
-wrapper, set `general.pub_resolution: CUSTOM` together with
-`general.pub_downscale_factor: 2.0`; the factor alone is ignored under the
-default `NATIVE` publishing mode. Confirm the actual image and `camera_info`
-dimensions before motion. The expected dimensions
-can be changed using `TMR_HAMBURG_HEAD_CAMERA_WIDTH` and
-`TMR_HAMBURG_HEAD_CAMERA_HEIGHT`; this changes validation only, not the
-Shanghai camera calibration or mission processing.
+## Camera resolution and coordinates
 
-Shanghai letter search uses image-normalized card centres and width-scaled
-candidate sizes, so a pure 2x resize does not require manually moving its
-drawn card centres. The Hamburg raw-image topic still needs a new mission
-consumer, and detection quality must be checked on real downscaled frames.
-See `INTEGRATION_AUDIT.md` for the coordinate audit.
+The wrist camera remains 640×480. Head-ZED downsampling does not change the
+wrist detector target, wrist visual Jacobian, or grasp alignment coordinates.
 
-The spine command interface is selectable with
-`TMR_HAMBURG_SPINE_INTERFACE=action|topic`. `action` is the Hamburg default.
-The topic option is retained for a different venue that actually subscribes to
-`/spine/target_height`; it must not be used to claim native Hamburg readiness.
-The action and position service names can be overridden with
-`TMR_HAMBURG_SPINE_ACTION_NAME` and
-`TMR_HAMBURG_SPINE_POSITION_SERVICE`. The gripper and scalar settings remain
-listed in the profile's `environment_overrides` map.
+Hamburg head RGB is expected at 640×360 `bgr8` on
+`/head_camera/zed_node/rgb/color/rect/image`. Configure the ZED wrapper with
+`general.pub_resolution: CUSTOM` and `general.pub_downscale_factor: 2.0`; verify
+the live image and `camera_info` dimensions. The letter detector uses normalized
+centres and rescales its card-size thresholds from the current image width, and
+annotations are drawn in the current frame. A pure 1280×720 → 640×360 resize
+therefore needs no manual halving of stored letter centres. Lower resolution can
+still reduce glyph confidence, so keep the saved evidence frames from the test.
 
-## Read-only venue check
+## Shanghai references and Hamburg dimensions
 
-After the organizer starts the robot stack and exports the venue's DDS values:
+`config/grasp-cycle-shanghai-reference.json` intentionally reuses the Shanghai
+pickup/parking posture, wrist target and visual Jacobian, spine `0.7 m`, and
+object descents (`cup=0.340`, `bowl=0.360`, `plate=0.375 m`) for the first trial.
+
+`config/mission-shanghai-reference.json` contains individually named Shanghai
+route values. These are starting values, not a generalized venue model. Hamburg
+room length/width, door position and clear width, tabletop height/size,
+base-to-table standoff, letter positions, and every route segment are independent
+physical quantities. Do not multiply all Shanghai distances by a room-size
+ratio. A table-height difference also does not by itself determine spine height
+or grasp descent: camera view, tool clearance, object height, and arm reach must
+be considered separately.
+
+The mission report always includes the selected parameter profile, the unchanged
+Shanghai values, and the Hamburg measurement fields. Use `site-config` to make
+an explicit local file without editing entrypoint code:
+
+```bash
+./deploy/hamburg/run_hamburg.sh site-config \
+  --mission-output /tmp/hamburg-mission.json \
+  --grasp-output /tmp/hamburg-grasp.json
+```
+
+Add the measured fields when they are available. The command accepts
+`--initial-forward-m`, `--before-door-m`, `--through-door-m`,
+`--pickup-approach-maximum-m`, `--pickup-front-clearance-m`, `--spine-m`, and
+the three object-specific `--*-descent-m` options. Fields not supplied remain
+clearly identified Shanghai references.
+
+## Run order
+
+Use the organizer's already sourced domain 0 / Fast DDS UDP-only environment.
+First run the native check without the temporary odometry or spine relays:
 
 ```bash
 ./deploy/hamburg/run_hamburg.sh check \
   --output /tmp/tmr_task3_hamburg_preflight.json
 ```
 
-The program uses one ROS node and does not start services or publish motion. It
-requires fresh arm, gripper, odometry, LiDAR, camera, and TF streams; live command
-subscribers; a ready native spine action; and a successful position service
-response. A native result is useful only when `status` is `ready`, `errors` is
-empty, `motion_commanded` is `false`,
-`ros_graph.temporary_relay_topics_present` is empty, and
-`ros_graph.native_spine` confirms both endpoints. The check blocks if the four
-known organizer bridge topics remain visible. A prior report produced with
-organizer relays does not establish native readiness.
+For each utensil placed alone in the pickup area, confirm the stationary view:
 
-Run `check --print-interface-only` to inspect the resolved profile without ROS.
-The generic image in `Dockerfile` verifies Humble/arm64 packaging, but a live
-native check inside it requires the organizer's `franka_spine_msgs` overlay in
-that container. Running directly in the sourced companion environment is the
-simplest path.
+```bash
+./deploy/hamburg/run_hamburg.sh grasp-check --object cup \
+  --output /tmp/cup-observation.json --image-output /tmp/cup-observation.png
+./deploy/hamburg/run_hamburg.sh grasp-check --object bowl \
+  --output /tmp/bowl-observation.json --image-output /tmp/bowl-observation.png
+./deploy/hamburg/run_hamburg.sh grasp-check --object plate \
+  --output /tmp/plate-observation.json --image-output /tmp/plate-observation.png
+```
 
-## Offline verification and physical tests
+Then run one physical closed-loop trial at a time. Each successful trial returns
+the utensil to its pickup position, opens the gripper, and finishes above it:
+
+```bash
+./deploy/hamburg/run_hamburg.sh grasp-test --object cup --execute \
+  --output /tmp/cup-grasp.json --output-dir /tmp/cup-grasp-evidence
+./deploy/hamburg/run_hamburg.sh grasp-test --object bowl --execute \
+  --output /tmp/bowl-grasp.json --output-dir /tmp/bowl-grasp-evidence
+./deploy/hamburg/run_hamburg.sh grasp-test --object plate --execute \
+  --output /tmp/plate-grasp.json --output-dir /tmp/plate-grasp-evidence
+```
+
+The pass condition requires a stable rim detection, visual alignment, completed
+descent/lift, and gripper feedback that differs from the empty-close baseline
+both before and after lift. A close command alone is not reported as a grasp.
+
+Inspect the full plan, then run it with the chosen files:
+
+```bash
+./deploy/hamburg/run_hamburg.sh mission \
+  --config /tmp/hamburg-mission.json --grasp-config /tmp/hamburg-grasp.json
+
+./deploy/hamburg/run_hamburg.sh mission --execute \
+  --config /tmp/hamburg-mission.json --grasp-config /tmp/hamburg-grasp.json \
+  --output /tmp/hamburg-stage1.json --output-dir /tmp/hamburg-stage1-evidence
+```
+
+The full mission reads native odometry, checks fresh dual LiDAR and head frames,
+stops on stale feedback or the configured LiDAR hard range, visually centres
+each assigned letter, uses the measured lateral search distance for the return,
+and latches a zero base command on completion or failure.
+
+See `TRIAL_AND_TROUBLESHOOTING.md` for phase-specific changes and
+`INTEGRATION_AUDIT.md` for the interface and organizer-glue audit.
+
+## Offline verification
 
 ```bash
 python3 -m unittest discover -s deploy/hamburg/tests -v
 python3 -m compileall -q deploy/hamburg
-python3 deploy/hamburg/hamburg_preflight.py --print-interface-only
-./deploy/hamburg/run_hamburg.sh grasp-check --object cup --plan
+./deploy/hamburg/run_hamburg.sh grasp-test --object cup
+./deploy/hamburg/run_hamburg.sh mission
 ```
-
-`grasp-check --object cup|bowl|plate` without `--plan` is a read-only live
-observation on the Humble companion. It uses one node, checks the native
-spine action/service, both arm and gripper state streams, command subscribers,
-the Shanghai pickup/parking joint targets, the 0.7 m spine height, and five
-fresh left-wrist frames with stable object-specific rim detections. For example:
-
-```bash
-./deploy/hamburg/run_hamburg.sh grasp-check --object cup \
-  --output /tmp/hamburg_cup_observation.json \
-  --image-output /tmp/hamburg_cup_observation.png
-```
-
-The result explicitly records `grasp_executed: false` and
-`motion_commanded: false`; `observation_ready` means only that this static view
-was detectable. The annotated PNG marks the detected rim on the actual wrist
-frame. `grasp-check-all /tmp/hamburg_grasps` runs all three detectors and saves
-one JSON and one annotated PNG per object. It uses the 640×480 left wrist camera only and does not require
-the head ZED's 640×360 output. The selected object, table height, joint targets, and visual
-calibration still require physical acceptance. `grasp-test` refuses motion.
-The separately runnable Shanghai grasp tests in
-`../../docs/STANDALONE_GRASP_TESTS.md` still depend on Shanghai
-MoveIt/PTP/gripper-action/camera interfaces and must not run on Hamburg.
-A physical Hamburg grasp test and full Stage 1 trial require a single-node motion
-port, calibration review, and an organizer-supervised run. See
-`COMPATIBILITY.md` and `ORGANIZER_ACTIONS.md` for the remaining work.
-The evidence and cross-module/domain audit are in `INTEGRATION_AUDIT.md`.
-For the Shanghai-reference-first trial order, room/table measurements,
-troubleshooting, and fast report-driven overrides, see
-`TRIAL_AND_TROUBLESHOOTING.md`.

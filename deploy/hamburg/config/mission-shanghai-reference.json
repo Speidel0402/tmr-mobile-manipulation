@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "profile_name": "hamburg_native_interfaces_with_shanghai_route_reference",
+  "profile_warning": "These are individually named Shanghai measurements for a first Hamburg trial. They are not generalized, scaled, or claimed to describe the Hamburg room.",
+  "topics": {
+    "odometry": "/swerve_drive_controller/odom",
+    "base_command": "/swerve_drive_controller/cmd_vel",
+    "front_lidar": "/lidar_front/scan",
+    "rear_lidar": "/lidar_rear/scan",
+    "head_image": "/head_camera/zed_node/rgb/color/rect/image"
+  },
+  "head_camera": {
+    "width": 640,
+    "height": 360,
+    "encodings": ["bgr8", "rgb8"],
+    "source": "Hamburg organizer-confirmed 2x ZED publication downscale; wrist-camera calibration is separate and unchanged"
+  },
+  "hamburg_measurements": {
+    "room_length_m": null,
+    "room_width_m": null,
+    "door_clear_width_m": null,
+    "tabletop_height_m": null,
+    "tabletop_length_m": null,
+    "tabletop_width_m": null,
+    "pickup_standoff_m": null,
+    "source": "must be measured independently on the Hamburg testbed; never derived from Shanghai by a scale factor"
+  },
+  "base_motion": {
+    "linear_speed_mps": 0.065,
+    "angular_speed_rps": 0.18,
+    "position_tolerance_m": 0.025,
+    "yaw_tolerance_deg": 2.0,
+    "no_progress_timeout_s": 4.0,
+    "feedback_stale_s": 0.45,
+    "minimum_lidar_range_m": 0.18
+  },
+  "outbound_shanghai_reference": [
+    {"name": "initial_forward", "kind": "translate", "forward_m": 0.85, "left_m": 0.0},
+    {"name": "clockwise_to_door", "kind": "rotate", "ccw_deg": -90.0},
+    {"name": "to_before_door", "kind": "translate", "forward_m": 0.50, "left_m": 0.0},
+    {"name": "through_door", "kind": "translate", "forward_m": 1.20, "left_m": 0.0},
+    {"name": "approach_pickup_table", "kind": "front_clearance", "maximum_forward_m": 1.60, "front_clearance_m": 0.30}
+  ],
+  "post_pick_shanghai_reference": [
+    {"name": "retreat_to_predoor", "kind": "translate", "forward_m": -1.70, "left_m": 0.0},
+    {"name": "turn_to_letters", "kind": "rotate", "ccw_deg": 180.0},
+    {"name": "backward_after_turn", "kind": "translate", "forward_m": -0.25, "left_m": 0.0}
+  ],
+  "letter_search_shanghai_reference": {
+    "alphabet": "ABCDE",
+    "maximum_right_m": 2.40,
+    "minimum_detection_right_m": 0.40,
+    "search_speed_mps": 0.055,
+    "refine_speed_mps": 0.040,
+    "center_tolerance_normalized": 0.055,
+    "stable_frames": 3,
+    "minimum_confidence": 0.22,
+    "row_split_y_normalized": 0.52,
+    "post_center_right_m": 0.08
+  },
+  "placement_shanghai_reference": {
+    "near_forward_m": 0.10,
+    "far_forward_m": 0.26
+  },
+  "return_to_pickup_shanghai_reference": {
+    "extra_left_after_measured_search_m": 0.20,
+    "clockwise_turn_deg": 180.0,
+    "to_before_door_m": 0.50,
+    "through_door_m": 1.20,
+    "approach_pickup_maximum_m": 1.60,
+    "pickup_front_clearance_m": 0.30
+  },
+  "assignment": {"cup": "B", "bowl": "A", "plate": "D"}
+}

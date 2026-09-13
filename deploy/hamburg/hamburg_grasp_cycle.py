@@ -253,6 +253,7 @@ class NativeArmGraspCycle:
         self.state_times = {"left": 0.0, "right": 0.0}
         self.gripper_samples: deque[tuple[float, list[float]]] = deque(maxlen=300)
         self.images: deque[tuple[int, Any]] = deque(maxlen=20)
+        self.image_at = 0.0
         self.commanded: dict[str, list[float] | None] = {"left": None, "right": None}
         self.last_report: dict[str, Any] = {}
         topics = config["topics"]
@@ -285,6 +286,7 @@ class NativeArmGraspCycle:
                 stamp = time.monotonic_ns()
             if not self.images or stamp > self.images[-1][0]:
                 self.images.append((stamp, message))
+                self.image_at = time.monotonic()
 
         node.create_subscription(JointState, topics["left_joint_state"], arm_callback("left"), qos_profile_sensor_data)
         node.create_subscription(JointState, topics["right_joint_state"], arm_callback("right"), qos_profile_sensor_data)
@@ -354,13 +356,39 @@ class NativeArmGraspCycle:
                 if self.gripper_samples else None
             ),
             "buffered_wrist_frames": len(self.images),
+            "latest_wrist_frame_age_s": (
+                round(now - self.image_at, 3) if self.image_at > 0.0 else None
+            ),
         }
+
+    def fresh_wrist_bgr(self, timeout_s: float = 3.0) -> Any:
+        """Wait for and decode a wrist frame received after this call starts."""
+        last_stamp = self.images[-1][0] if self.images else 0
+        decode_errors: deque[str] = deque(maxlen=3)
+        fresh_frames = 0
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self.spin_for(0.05)
+            fresh = [(stamp, image) for stamp, image in self.images if stamp > last_stamp]
+            for stamp, image in fresh:
+                last_stamp = stamp
+                fresh_frames += 1
+                try:
+                    return decode_wrist_rgb(image)
+                except Exception as exc:
+                    decode_errors.append(f"{type(exc).__name__}: {exc}")
+        age = time.monotonic() - self.image_at if self.image_at > 0.0 else math.inf
+        detail = "; ".join(decode_errors) if decode_errors else "no post-reset frame received"
+        raise RuntimeError(
+            "no fresh usable left wrist frame after reset "
+            f"(fresh_frames={fresh_frames}, latest_age_s={age:.3f}, detail={detail})"
+        )
 
     def set_phase(self, report: dict[str, Any], phase: str) -> None:
         report["active_phase"] = phase
         print(json.dumps({
             "event": "phase",
-            "operation": "grasp-test",
+            "operation": report.get("entrypoint", "grasp-test"),
             "object": report.get("object"),
             "phase": phase,
         }), file=sys.stderr, flush=True)

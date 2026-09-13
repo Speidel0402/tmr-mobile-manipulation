@@ -23,6 +23,9 @@ case "${MODE}" in
     done
     exit "${failed}"
     ;;
+  pickup-reset)
+    exec python3 "${SCRIPT_DIR}/hamburg_pickup_reset.py" "$@"
+    ;;
   geometry-review)
     exec python3 "${SCRIPT_DIR}/geometry_review.py" "$@"
     ;;
@@ -36,7 +39,7 @@ case "${MODE}" in
     exec python3 "${SCRIPT_DIR}/hamburg_site_config.py" "$@"
     ;;
   *)
-    echo "usage: $0 {check|grasp-check|grasp-check-all|geometry-review|grasp-test|mission|site-config} [arguments]" >&2
+    echo "usage: $0 {check|grasp-check|grasp-check-all|pickup-reset|geometry-review|grasp-test|mission|site-config} [arguments]" >&2
     exit 64
     ;;
 esac

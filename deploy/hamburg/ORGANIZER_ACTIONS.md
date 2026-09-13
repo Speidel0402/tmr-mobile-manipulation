@@ -7,13 +7,21 @@ the mission calls MoveAbsolute directly.
 Stop manual publishers to the arm, gripper and base command topics during the
 autonomous run.
 
-Place the cup, bowl and plate in the normal pickup arrangement. Each grasp test
-resets the arms to the Shanghai-reference pickup configuration; the left wrist
-camera should then have an approximate view of all three objects. Run cup, bowl
-and plate separately, resetting the arrangement between runs. These tests do
-not move the base:
+Place the cup, bowl and plate in the normal pickup arrangement, then manually
+place the stopped robot beside the pickup table with clear arm workspace. Run
+the pickup reset first. It moves only the spine, arms and left gripper, saves a
+fresh 640×480 left-wrist frame, and does not create a base command publisher:
 
     ./deploy/hamburg/run_hamburg.sh check --output /tmp/hamburg-check.json
+    ./deploy/hamburg/run_hamburg.sh pickup-reset
+    ./deploy/hamburg/run_hamburg.sh pickup-reset --execute \
+      --output /tmp/pickup-reset.json --output-dir /tmp/pickup-reset-evidence
+
+Confirm that `/tmp/pickup-reset-evidence/pickup-reset-left-wrist.png` shows the
+table and approximately all three utensils. Then run cup, bowl and plate
+separately, resetting the arrangement between runs. The grasp tests reset the
+arms to the same Shanghai-reference pickup configuration and do not move the
+base:
 
     ./deploy/hamburg/run_hamburg.sh grasp-test --object cup --execute \
       --output /tmp/cup-grasp.json --output-dir /tmp/cup-evidence

@@ -35,6 +35,7 @@ jobs:
           python deploy/hamburg/hamburg_grasp_check.py --object cup --plan >/dev/null
           python deploy/hamburg/hamburg_grasp_check.py --object bowl --plan >/dev/null
           python deploy/hamburg/hamburg_grasp_check.py --object plate --plan >/dev/null
+          python deploy/hamburg/hamburg_pickup_reset.py >/dev/null
           python deploy/hamburg/audit_submission.py \
             --output /tmp/tmr_task3_hamburg_source_audit.json >/dev/null
 

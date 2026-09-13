@@ -61,7 +61,8 @@ class HamburgPackageTests(unittest.TestCase):
 
     def test_hamburg_executables_do_not_use_remote_or_cli_or_override_dds(self) -> None:
         paths = [ROOT / "hamburg_preflight.py", ROOT / "hamburg_grasp_check.py",
-                 ROOT / "spine_control.py", ROOT / "run_hamburg.sh"]
+                 ROOT / "spine_control.py", ROOT / "hamburg_pickup_reset.py",
+                 ROOT / "run_hamburg.sh"]
         forbidden = (
             "subprocess",
             "paramiko",
@@ -465,6 +466,7 @@ class HamburgPackageTests(unittest.TestCase):
         self.assertIn("python3-opencv", dockerfile)
         self.assertIn("grasp/scripts/cup_rim_detector.py", dockerfile)
         self.assertIn("base/scripts/letter_card_vision.py", dockerfile)
+        self.assertIn("hamburg_pickup_reset.py", dockerfile)
         self.assertNotIn("python:3.11", dockerfile)
 
 

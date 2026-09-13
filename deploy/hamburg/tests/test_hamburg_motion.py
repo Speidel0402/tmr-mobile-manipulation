@@ -18,12 +18,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hamburg_grasp_cycle import (
+    NativeArmGraspCycle,
     alignment_delta_m,
     load_cycle_config,
     plan_report as grasp_plan,
     resolve_cycle_venue_overrides,
     validate_cycle_venue_consistency,
 )
+from hamburg_pickup_reset import plan_report as pickup_reset_plan, run_reset
 from hamburg_mission import (
     HamburgMission,
     NativeBaseControl,
@@ -99,8 +101,11 @@ class HamburgMotionTests(unittest.TestCase):
     def test_entrypoint_plans_are_executable_and_preserve_parameter_scope(self) -> None:
         validate_mission_config(self.mission)
         grasp = grasp_plan(self.grasp, "cup", None)
+        reset = pickup_reset_plan(self.grasp)
         mission = mission_plan(self.mission, self.grasp)
         self.assertEqual(grasp["operation"], "Hamburg autonomous observation-grasp-release trial")
+        self.assertFalse(reset["base_motion_commanded"])
+        self.assertEqual(reset["expected_left_wrist_frame"], {"width": 640, "height": 480})
         self.assertTrue(grasp["single_ros_node_during_motion"])
         self.assertTrue(mission["single_ros_node_during_motion"])
         self.assertEqual(mission["native_interfaces"]["base_state"], "/swerve_drive_controller/odom")
@@ -109,10 +114,89 @@ class HamburgMotionTests(unittest.TestCase):
 
     def test_launcher_routes_physical_modes_instead_of_static_lock(self) -> None:
         launcher = (ROOT / "run_hamburg.sh").read_text(encoding="utf-8")
+        self.assertIn('hamburg_pickup_reset.py', launcher)
         self.assertIn('hamburg_grasp_cycle.py', launcher)
         self.assertIn('hamburg_mission.py', launcher)
         self.assertNotIn('physical grasp test is locked', launcher)
         self.assertNotIn('mission is locked', launcher)
+
+    def test_pickup_reset_has_no_base_path_and_orders_the_arm_reset(self) -> None:
+        source = (ROOT / "hamburg_pickup_reset.py").read_text(encoding="utf-8")
+        self.assertNotIn("NativeBaseControl", source)
+        self.assertNotIn("cmd_vel", source)
+        self.assertNotIn("create_publisher", source)
+
+        events = []
+
+        class Arm:
+            def __init__(self):
+                self.last_report = {}
+
+            def set_phase(self, _report, phase):
+                events.append(("phase", phase))
+
+            def wait_live(self, timeout):
+                events.append(("wait_live", timeout))
+
+            def assert_controller_graph(self):
+                events.append(("controller_graph",))
+                return {"left_joint_target": 1, "right_joint_target": 1,
+                        "left_gripper_target": 1}
+
+            def move_to_joint_posture(self, arm, target):
+                events.append(("move", arm, list(target)))
+
+            def command_gripper(self, target):
+                events.append(("gripper", target))
+                return [0.04, 0.04]
+
+            def fresh_wrist_bgr(self):
+                events.append(("fresh_wrist",))
+                return np.zeros((480, 640, 3), dtype=np.uint8)
+
+            def spin_for(self, duration):
+                events.append(("hold", duration))
+
+        class Spine:
+            def move_absolute(self, target):
+                events.append(("spine", target))
+                return {"target_position_m": target, "moved": True}
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("cv2.imwrite", return_value=True):
+            report = run_reset(Arm(), Spine(), self.grasp, Path(directory))
+
+        self.assertEqual(report["status"], "passed")
+        self.assertFalse(report["base_motion_commanded"])
+        self.assertEqual(report["left_wrist_frame"], {"width": 640, "height": 480})
+        ordered_actions = [item[0:2] for item in events if item[0] in
+                           {"spine", "move", "gripper", "fresh_wrist"}]
+        self.assertEqual(ordered_actions, [
+            ("spine", 0.7),
+            ("move", "right"),
+            ("move", "left"),
+            ("gripper", 0.8),
+            ("fresh_wrist",),
+        ])
+
+    def test_fresh_wrist_frame_skips_bad_post_reset_frames(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.images = deque([(1, object())], maxlen=20)
+        runner.image_at = 0.0
+        calls = 0
+
+        def spin(_duration):
+            nonlocal calls
+            calls += 1
+            runner.images.append((calls + 1, object()))
+
+        runner.spin_for = spin
+        expected = np.zeros((480, 640, 3), dtype=np.uint8)
+        with mock.patch("hamburg_grasp_cycle.decode_wrist_rgb",
+                        side_effect=[ValueError("bad encoding"), expected]):
+            actual = runner.fresh_wrist_bgr(timeout_s=0.5)
+        self.assertIs(actual, expected)
+        self.assertEqual(calls, 2)
 
     def test_runtime_profiles_must_match_resolved_venue_interfaces(self) -> None:
         venue = load_config(ROOT / "config" / "venue.json")

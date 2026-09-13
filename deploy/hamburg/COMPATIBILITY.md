@@ -1,6 +1,6 @@
 # Hamburg compatibility
 
-The existing Shanghai implementation is preserved. Hamburg uses two native
+The existing Shanghai implementation is preserved. Hamburg uses native
 entrypoints under this directory because the venue has one ROS 2 Humble
 companion and no documented MoveIt/PTP path.
 

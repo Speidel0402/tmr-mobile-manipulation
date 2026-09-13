@@ -3,6 +3,8 @@
 The organizer's ready preflight proves the bridged read-only graph, not a grasp
 or Stage 1. The minimum Hamburg adaptation now provides:
 
+- pickup-reset: manual table-side base placement followed by native spine/arm
+  reset and a fresh 640×480 left-wrist review frame, with no base command path;
 - grasp-test: wrist observation, visual XY correction, object-specific
   descent, close, lift, gripper contact/retention check, release and retract;
 - mission: the same grasp loop plus native odometry base motion, raw head-ZED

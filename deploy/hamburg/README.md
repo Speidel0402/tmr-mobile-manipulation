@@ -7,13 +7,15 @@ change the DDS domain, use SSH, or require the organizer's temporary bridges.
 The trial order is deliberately staged:
 
 1. native interface check;
-2. stationary wrist observation for cup, bowl, then plate;
-3. autonomous observation → visual correction → grasp → lift → contact check →
+2. manual base placement beside the pickup table, followed by the arm/spine
+   pickup-view reset and a fresh left-wrist review image;
+3. stationary wrist observation for cup, bowl, then plate;
+4. autonomous observation → visual correction → grasp → lift → contact check →
    release for each utensil;
-4. the one-node cup → B, bowl → A, plate → D mission.
+5. the one-node cup → B, bowl → A, plate → D mission.
 
-`grasp-test` and `mission` are runnable. Without `--execute` they print the
-resolved plan; with `--execute` they use the physical interfaces.
+`pickup-reset`, `grasp-test` and `mission` are runnable. Without `--execute`
+they print the resolved plan; with `--execute` they use the physical interfaces.
 
 ## Native control path
 
@@ -35,8 +37,8 @@ joint-impedance controller input. The official FR3v2 kinematic chain and joint
 limits are applied locally, so the Hamburg path does not depend on MoveIt, PTP,
 IK/FK services, or Robotiq actions.
 
-`hamburg_grasp_cycle.py` and `hamburg_mission.py` each create one ROS node and
-construct all subscriptions, publishers, action clients, and service clients
+Each physical entrypoint creates one ROS node and
+constructs all subscriptions, publishers, action clients, and service clients
 before active motion. They keep publishing arm hold targets while the base,
 vision, and gripper loops run. No phase starts a child process or creates a new
 DDS participant.
@@ -99,7 +101,25 @@ First run the native check without the temporary odometry or spine relays:
   --output /tmp/tmr_task3_hamburg_preflight.json
 ```
 
-For each utensil placed alone in the pickup area, confirm the stationary view:
+Next, manually place the stopped mobile base beside the pickup table with clear
+arm workspace and arrange all three utensils as in the pickup trial. Inspect the
+plan, then execute the reset:
+
+```bash
+./deploy/hamburg/run_hamburg.sh pickup-reset
+./deploy/hamburg/run_hamburg.sh pickup-reset --execute \
+  --output /tmp/pickup-reset.json \
+  --output-dir /tmp/pickup-reset-evidence
+```
+
+This entrypoint does not create a base command publisher and never moves the
+base. It sets the spine and both arms to the Shanghai-reference pickup view,
+opens the left gripper, then saves a newly received 640×480 frame as
+`/tmp/pickup-reset-evidence/pickup-reset-left-wrist.png`. Continue when that
+frame shows the pickup table and approximately all three utensils. If it does
+not, correct the manual base placement and view before changing grasp values.
+
+Confirm each selected utensil in the stationary wrist view:
 
 ```bash
 ./deploy/hamburg/run_hamburg.sh grasp-check --object cup \
@@ -153,6 +173,7 @@ See `TRIAL_AND_TROUBLESHOOTING.md` for phase-specific changes and
 ```bash
 python3 -m unittest discover -s deploy/hamburg/tests -v
 python3 -m compileall -q deploy/hamburg
+./deploy/hamburg/run_hamburg.sh pickup-reset
 ./deploy/hamburg/run_hamburg.sh grasp-test --object cup
 ./deploy/hamburg/run_hamburg.sh mission
 ```

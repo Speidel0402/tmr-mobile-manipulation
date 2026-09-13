@@ -19,6 +19,7 @@ COPY grasp/scripts/cup_rim_detector.py grasp/scripts/detect_food_bowl.py grasp/s
 COPY base/scripts/letter_card_vision.py /opt/tmr-task3/base/scripts/letter_card_vision.py
 RUN chmod +x /opt/tmr-task3/deploy/hamburg/run_hamburg.sh \
     && python3 -m compileall -q /opt/tmr-task3/deploy/hamburg /opt/tmr-task3/grasp/scripts /opt/tmr-task3/base/scripts \
+    && python3 /opt/tmr-task3/deploy/hamburg/hamburg_pickup_reset.py >/dev/null \
     && python3 /opt/tmr-task3/deploy/hamburg/hamburg_grasp_cycle.py --object cup >/dev/null \
     && python3 /opt/tmr-task3/deploy/hamburg/hamburg_mission.py >/dev/null
 

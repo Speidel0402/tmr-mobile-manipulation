@@ -8,14 +8,21 @@ complete mission only after all three utensils pass.
 ## 1. Stationary observation-to-grasp checks
 
 Please place the cup, food bowl and plate in the normal pickup arrangement.
-Before observation, each grasp test resets the arms to the pickup configuration
-used for the Shanghai trial. From this reset pose, the left wrist camera should
-have an approximate view of all three objects. Each command below observes and
-grasps only the selected utensil. This test does not move the mobile base.
+Please then place the stopped robot beside the pickup table with clear arm
+workspace. The dedicated reset command moves only the spine, arms and left
+gripper to the pickup configuration used for the Shanghai trial. It does not
+move the mobile base. It saves a fresh 640×480 left-wrist image; please confirm
+that `/tmp/pickup-reset-evidence/pickup-reset-left-wrist.png` shows the table
+and approximately all three objects before starting the grasp checks.
 
 ```bash
 ./deploy/hamburg/run_hamburg.sh check \
   --output /tmp/hamburg-check.json
+
+./deploy/hamburg/run_hamburg.sh pickup-reset
+./deploy/hamburg/run_hamburg.sh pickup-reset --execute \
+  --output /tmp/pickup-reset.json \
+  --output-dir /tmp/pickup-reset-evidence
 
 ./deploy/hamburg/run_hamburg.sh grasp-test --object cup --execute \
   --output /tmp/cup-grasp.json --output-dir /tmp/cup-evidence
@@ -25,10 +32,11 @@ grasps only the selected utensil. This test does not move the mobile base.
   --output /tmp/plate-grasp.json --output-dir /tmp/plate-evidence
 ```
 
-Please reset the utensil arrangement between runs. If a trial fails, please
-send its terminal output, JSON report and saved wrist image; these identify
-whether the problem is the reset view, perception, arm response or gripper
-feedback.
+Each grasp command observes and grasps only the selected utensil and does not
+move the base. Please reset the utensil arrangement between runs. If the reset
+or a trial fails, please send its terminal output, JSON report and saved wrist
+image; these identify whether the problem is the table-side view, perception,
+arm response or gripper feedback.
 
 ## 2. Complete closed-loop mission
 

@@ -16,7 +16,7 @@ still stop the base and prevent the next phase.
 | Environment/preflight failure | Domain 0, `rmw_fastrtps_cpp`, UDP-only profile, native topic types and spine action/service | Correct the sourced Hamburg environment. Do not source Shanghai domain 97/Jazzy launchers. |
 | Pickup-reset image does not show the table or all three utensils | Manual base position and heading, table edge, table height, occlusion and clear arm workspace | Reposition the stopped base beside the table and rerun `pickup-reset`. If measured table height still leaves the vertical view wrong, create a copied grasp config with `site-config --spine-m` and pass it to `pickup-reset --config`; keep the wrist mapping and grasp descent unchanged until the view is confirmed. |
 | Arm target has `gello` in its name | This is the organizer-confirmed direct JointState input to the Franka impedance controller; no leader device is used | Do not rename the topic unless the organizer reports a different controller endpoint. Override the topic only in a copied grasp JSON. |
-| Arm following error or endpoint timeout | Reported arm, maximum error and measured joints; controller update/hold requirements | Lower `motion.maximum_joint_velocity_rad_s` in the copied grasp JSON, or correct joint-name order/topic from organizer feedback. Do not alter IK or descent first. |
+| Arm lag hold, following error or endpoint timeout | Reported lag/recovery events, arm, maximum error, measured/commanded joints and feedback age | The runner now freezes the current target at transient lag and resumes only after both arms catch up. For repeated posture lag, lower `motion.posture_joint_velocity_rad_s` or set `TMR_HAMBURG_ARM_POSTURE_VELOCITY_RAD_S`; change the hard limit only from measured venue evidence. Persistent lag, stale feedback and hard-limit errors still abort. Do not alter IK, wrist calibration or descent for this symptom. |
 | Object not detected or rim point unstable | Saved 640×480 wrist frame, lighting, object placement, occlusion and frame identity | Fix the physical view first. If the approved camera pose changes, recalibrate `target_right_rim_px` and `shanghai_base_xy_to_image_uv`; do not reuse the old pixel mapping by assertion. |
 | Visual corrections move away from the target | Per-iteration pixel error and commanded base-XY delta in the report | Re-estimate the two-column wrist Jacobian from small measured X/Y probes. Changing room dimensions cannot fix its sign or scale. |
 | Descent reaches limit or misses utensil | Exact object, top pose, tabletop/object height, last joints and clearance | Change only that object's `descent_m` in a copied grasp JSON, initially in small measured increments. Do not apply one table-height delta to all utensils automatically. |
@@ -48,6 +48,14 @@ Create measured overrides without changing the launcher:
   --initial-forward-m MEASURED --before-door-m MEASURED \
   --through-door-m MEASURED --pickup-front-clearance-m MEASURED
 ```
+
+Arm motion values are also independent venue overrides. The current defaults
+retain the original `0.06 rad/s` posture ramp, hold target advancement only at
+`0.20 rad` lag, resume below `0.14 rad`, abort above `0.24 rad`, and allow `5 s`
+for recovery.
+They specifically address the fresh-feedback Hamburg trial in which the right
+controller reached `0.1603 rad` transient lag. They do not change the Cartesian
+waypoints, wrist-camera resolution, Shanghai pixel mapping, or object descents.
 
 Then pass both files to `grasp-test`/`mission` as shown in the README. The
 generated mission file lists any Hamburg measurement fields that are still

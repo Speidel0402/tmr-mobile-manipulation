@@ -17,6 +17,15 @@ The trial order is deliberately staged:
 `pickup-reset`, `grasp-test` and `mission` are runnable. Without `--execute`
 they print the resolved plan; with `--execute` they use the physical interfaces.
 
+The Hamburg arm controller may track a long parking move more slowly than a
+short Cartesian grasp move. Posture speed therefore has its own venue override,
+while the default remains the original `0.06 rad/s` ramp. The hard following
+guard now has margin above the measured Hamburg transient. Only if lag reaches
+a higher fallback threshold does the node freeze the current target until both
+arms catch up. Feedback that exceeds the hard limit, becomes stale, or does not
+recover still aborts the phase. The same behavior is used by `pickup-reset`,
+every standalone grasp, and the full mission.
+
 ## Native control path
 
 | Component | Hamburg path used by these entrypoints |
@@ -87,6 +96,22 @@ Add the measured fields when they are available. The command accepts
 `--pickup-approach-maximum-m`, `--pickup-front-clearance-m`, `--spine-m`, and
 the three object-specific `--*-descent-m` options. Fields not supplied remain
 clearly identified Shanghai references.
+
+The site-config command also accepts `--posture-velocity-rad-s`,
+`--maximum-following-error-rad`, `--following-error-pause-rad`,
+`--following-error-resume-rad`, and
+`--following-error-recovery-timeout-s`. For a quick venue-only trial, the same
+values can be supplied without editing a file:
+
+```bash
+export TMR_HAMBURG_ARM_POSTURE_VELOCITY_RAD_S=0.05
+```
+
+The relaxed default guard should be tried first, with the original motion
+timing. If the controller remains slower, lower the posture velocity before
+increasing the hard limit again. Every
+applied environment override and every lag/recovery event is included in the
+JSON report.
 
 ## Run order
 

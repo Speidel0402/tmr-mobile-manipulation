@@ -54,6 +54,13 @@ def plan_report(config: dict[str, Any]) -> dict[str, Any]:
         ],
         "parameter_profile": config["profile_name"],
         "parameter_scope": config["parameter_scope"],
+        "arm_motion": {
+            key: config["motion"][key] for key in (
+                "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
+                "following_error_resume_rad", "following_error_pause_rad",
+                "maximum_following_error_rad", "following_error_recovery_timeout_s",
+            )
+        },
     }
 
 
@@ -75,6 +82,13 @@ def run_reset(
         "manual_base_placement_required": True,
         "parameter_profile": config["profile_name"],
         "applied_venue_overrides": config.get("applied_venue_overrides", {}),
+        "arm_motion": {
+            key: config["motion"][key] for key in (
+                "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
+                "following_error_resume_rad", "following_error_pause_rad",
+                "maximum_following_error_rad", "following_error_recovery_timeout_s",
+            )
+        },
         "phases_completed": [],
     }
     runner.last_report = report

@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hamburg_grasp_cycle import validate_motion_config
+
 
 HERE = Path(__file__).resolve().parent
 MISSION_DEFAULT = HERE / "config" / "mission-shanghai-reference.json"
@@ -37,6 +39,11 @@ def main() -> int:
     parser.add_argument("--bowl-descent-m", type=float)
     parser.add_argument("--plate-descent-m", type=float)
     parser.add_argument("--spine-m", type=float)
+    parser.add_argument("--posture-velocity-rad-s", type=float)
+    parser.add_argument("--maximum-following-error-rad", type=float)
+    parser.add_argument("--following-error-pause-rad", type=float)
+    parser.add_argument("--following-error-resume-rad", type=float)
+    parser.add_argument("--following-error-recovery-timeout-s", type=float)
     args = parser.parse_args()
 
     mission = json.loads(args.mission_template.read_text(encoding="utf-8"))
@@ -60,6 +67,14 @@ def main() -> int:
     for name in ("cup", "bowl", "plate"):
         set_if(getattr(args, f"{name}_descent_m"), grasp["objects"][name], "descent_m")
     set_if(args.spine_m, grasp["spine"], "initial_target_m")
+    for argument, key in (
+        (args.posture_velocity_rad_s, "posture_joint_velocity_rad_s"),
+        (args.maximum_following_error_rad, "maximum_following_error_rad"),
+        (args.following_error_pause_rad, "following_error_pause_rad"),
+        (args.following_error_resume_rad, "following_error_resume_rad"),
+        (args.following_error_recovery_timeout_s, "following_error_recovery_timeout_s"),
+    ):
+        set_if(argument, grasp["motion"], key)
     for key, value in measurements.items():
         if key != "source" and value is not None and float(value) <= 0.0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
@@ -78,6 +93,10 @@ def main() -> int:
             parser.error(f"--{name}-descent-m must be between 0.05 and 0.40")
     if not 0.0 <= float(grasp["spine"]["initial_target_m"]) <= 0.8:
         parser.error("--spine-m must be between 0.0 and 0.8")
+    try:
+        validate_motion_config(grasp["motion"])
+    except (KeyError, TypeError, ValueError) as exc:
+        parser.error(str(exc))
     mission["profile_name"] = "hamburg_site_override"
     mission["profile_warning"] = (
         "This file contains explicit site values supplied for Hamburg. Any unchanged route field "

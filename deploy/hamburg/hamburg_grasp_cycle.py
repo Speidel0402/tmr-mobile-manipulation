@@ -40,6 +40,37 @@ DEFAULT_VENUE_CONFIG = HERE / "config" / "venue.json"
 OBJECTS = ("cup", "bowl", "plate")
 
 
+def validate_motion_config(motion: dict[str, Any]) -> None:
+    positive_motion = (
+        "publish_rate_hz", "maximum_joint_velocity_rad_s",
+        "posture_joint_velocity_rad_s", "maximum_following_error_rad",
+        "following_error_pause_rad", "following_error_resume_rad",
+        "following_error_recovery_timeout_s", "endpoint_tolerance_rad",
+        "endpoint_timeout_s", "cartesian_waypoint_step_m",
+        "maximum_visual_xy_travel_m", "maximum_visual_step_m",
+    )
+    for field in positive_motion:
+        value = float(motion[field])
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"motion.{field} must be positive and finite")
+    if float(motion["posture_joint_velocity_rad_s"]) > float(
+        motion["maximum_joint_velocity_rad_s"]
+    ):
+        raise ValueError(
+            "motion.posture_joint_velocity_rad_s must not exceed "
+            "motion.maximum_joint_velocity_rad_s"
+        )
+    resume = float(motion["following_error_resume_rad"])
+    pause = float(motion["following_error_pause_rad"])
+    maximum = float(motion["maximum_following_error_rad"])
+    if not resume < pause < maximum:
+        raise ValueError(
+            "motion following-error limits must satisfy resume < pause < maximum"
+        )
+    if maximum > 0.35:
+        raise ValueError("motion.maximum_following_error_rad must not exceed 0.35 rad")
+
+
 def load_cycle_config(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     required = {
@@ -72,15 +103,19 @@ def load_cycle_config(path: Path) -> dict[str, Any]:
     quaternion = np.asarray(data["posture"]["left_tool_quaternion_xyzw"], dtype=float)
     if quaternion.shape != (4,) or not np.all(np.isfinite(quaternion)) or np.linalg.norm(quaternion) < 1.0e-6:
         raise ValueError("posture.left_tool_quaternion_xyzw must be a non-zero finite quaternion")
-    positive_motion = (
-        "publish_rate_hz", "maximum_joint_velocity_rad_s", "maximum_following_error_rad",
-        "endpoint_tolerance_rad", "endpoint_timeout_s", "cartesian_waypoint_step_m",
-        "maximum_visual_xy_travel_m", "maximum_visual_step_m",
+    # Config copies made from the previous Hamburg commit remain runnable.  The
+    # new defaults add a separate posture-speed override and a bounded
+    # hold-and-catch-up window without changing an older file's normal ramp.
+    motion = data["motion"]
+    maximum_velocity = float(motion["maximum_joint_velocity_rad_s"])
+    maximum_error = float(motion["maximum_following_error_rad"])
+    motion.setdefault("posture_joint_velocity_rad_s", maximum_velocity)
+    motion.setdefault("following_error_pause_rad", min(0.20, maximum_error * 0.80))
+    motion.setdefault(
+        "following_error_resume_rad", float(motion["following_error_pause_rad"]) * 0.70
     )
-    for field in positive_motion:
-        value = float(data["motion"][field])
-        if not math.isfinite(value) or value <= 0.0:
-            raise ValueError(f"motion.{field} must be positive and finite")
+    motion.setdefault("following_error_recovery_timeout_s", 5.0)
+    validate_motion_config(motion)
     vision = data["vision"]
     width, height = int(vision["width"]), int(vision["height"])
     if (width, height) != (640, 480):
@@ -187,6 +222,26 @@ def resolve_cycle_venue_overrides(config: dict[str, Any], venue: dict[str, Any])
         "TMR_HAMBURG_GRIPPER_OPEN": (("gripper", "open"), profile["gripper"]["open"]),
         "TMR_HAMBURG_GRIPPER_CLOSED": (("gripper", "closed"), profile["gripper"]["closed"]),
         "TMR_HAMBURG_SPINE_HOME_M": (("spine", "initial_target_m"), profile["spine"]["home_m"]),
+        "TMR_HAMBURG_ARM_POSTURE_VELOCITY_RAD_S": (
+            ("motion", "posture_joint_velocity_rad_s"),
+            profile["arm_motion"]["posture_joint_velocity_rad_s"],
+        ),
+        "TMR_HAMBURG_ARM_MAXIMUM_FOLLOWING_ERROR_RAD": (
+            ("motion", "maximum_following_error_rad"),
+            profile["arm_motion"]["maximum_following_error_rad"],
+        ),
+        "TMR_HAMBURG_ARM_FOLLOWING_ERROR_PAUSE_RAD": (
+            ("motion", "following_error_pause_rad"),
+            profile["arm_motion"]["following_error_pause_rad"],
+        ),
+        "TMR_HAMBURG_ARM_FOLLOWING_ERROR_RESUME_RAD": (
+            ("motion", "following_error_resume_rad"),
+            profile["arm_motion"]["following_error_resume_rad"],
+        ),
+        "TMR_HAMBURG_ARM_FOLLOWING_ERROR_RECOVERY_TIMEOUT_S": (
+            ("motion", "following_error_recovery_timeout_s"),
+            profile["arm_motion"]["following_error_recovery_timeout_s"],
+        ),
     }
     for environment_name, (path, value) in mappings.items():
         if environment_name not in applied:
@@ -195,6 +250,7 @@ def resolve_cycle_venue_overrides(config: dict[str, Any], venue: dict[str, Any])
         changes[".".join(path)] = value
     if changes:
         resolved["applied_venue_overrides"] = changes
+    validate_motion_config(resolved["motion"])
     validate_cycle_venue_consistency(resolved, venue)
     return resolved
 
@@ -234,6 +290,13 @@ def plan_report(config: dict[str, Any], object_name: str, descent_override: floa
         "motion_commanded": False,
         "parameter_scope": config["parameter_scope"],
         "selected_descent_m": descent,
+        "arm_motion": {
+            key: config["motion"][key] for key in (
+                "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
+                "following_error_resume_rad", "following_error_pause_rad",
+                "maximum_following_error_rad", "following_error_recovery_timeout_s",
+            )
+        },
     }
 
 
@@ -255,6 +318,7 @@ class NativeArmGraspCycle:
         self.images: deque[tuple[int, Any]] = deque(maxlen=20)
         self.image_at = 0.0
         self.commanded: dict[str, list[float] | None] = {"left": None, "right": None}
+        self.following_lag_events: deque[dict[str, Any]] = deque(maxlen=30)
         self.last_report: dict[str, Any] = {}
         topics = config["topics"]
 
@@ -359,6 +423,7 @@ class NativeArmGraspCycle:
             "latest_wrist_frame_age_s": (
                 round(now - self.image_at, 3) if self.image_at > 0.0 else None
             ),
+            "following_lag_events": list(getattr(self, "following_lag_events", [])),
         }
 
     def fresh_wrist_bgr(self, timeout_s: float = 3.0) -> Any:
@@ -369,6 +434,7 @@ class NativeArmGraspCycle:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             self.spin_for(0.05)
+            self._check_all_following()
             fresh = [(stamp, image) for stamp, image in self.images if stamp > last_stamp]
             for stamp, image in fresh:
                 last_stamp = stamp
@@ -435,7 +501,7 @@ class NativeArmGraspCycle:
             message.position = list(values)
             self.arm_publishers[arm].publish(message)
 
-    def _check_following(self, arm: str) -> None:
+    def _check_following(self, arm: str) -> float:
         measured = self.states[arm]
         commanded = self.commanded[arm]
         if measured is None or commanded is None:
@@ -443,13 +509,78 @@ class NativeArmGraspCycle:
         age = time.monotonic() - self.state_times[arm]
         if age > 0.5:
             raise RuntimeError(f"{arm} joint feedback became stale (age={age:.3f}s)")
-        error = max(abs(a - b) for a, b in zip(measured, commanded))
+        joint_errors = [abs(a - b) for a, b in zip(measured, commanded)]
+        joint_index = max(range(len(joint_errors)), key=joint_errors.__getitem__)
+        error = joint_errors[joint_index]
         if error > float(self.config["motion"]["maximum_following_error_rad"]):
-            raise RuntimeError(f"{arm} following error {error:.4f} rad exceeds limit")
+            limit = float(self.config["motion"]["maximum_following_error_rad"])
+            joint_name = self.config["joint_names"][arm][joint_index]
+            raise RuntimeError(
+                f"{arm} following error {error:.4f} rad at {joint_name} exceeds hard "
+                f"limit {limit:.4f} rad (commanded={commanded[joint_index]:.4f}, "
+                f"measured={measured[joint_index]:.4f})"
+            )
+        return error
 
     def _check_all_following(self) -> None:
-        for arm in ("left", "right"):
-            self._check_following(arm)
+        errors = {arm: self._check_following(arm) for arm in ("left", "right")}
+        pause = float(self.config["motion"]["following_error_pause_rad"])
+        if max(errors.values()) <= pause:
+            return
+
+        resume = float(self.config["motion"]["following_error_resume_rad"])
+        timeout = float(self.config["motion"]["following_error_recovery_timeout_s"])
+        started = time.monotonic()
+        event: dict[str, Any] = {
+            "status": "holding_for_controller",
+            "phase": getattr(self, "last_report", {}).get("active_phase", "unknown"),
+            "trigger_errors_rad": {arm: round(value, 5) for arm, value in errors.items()},
+            "trigger_measured_joints": {
+                arm: list(self.states[arm] or []) for arm in ("left", "right")
+            },
+            "trigger_commanded_joints": {
+                arm: list(self.commanded[arm] or []) for arm in ("left", "right")
+            },
+            "peak_errors_rad": {arm: round(value, 5) for arm, value in errors.items()},
+            "pause_rad": pause,
+            "resume_rad": resume,
+            "hard_limit_rad": float(self.config["motion"]["maximum_following_error_rad"]),
+        }
+        self.following_lag_events.append(event)
+        print(json.dumps({"event": "arm_following_lag", **event}), file=sys.stderr, flush=True)
+        deadline = started + timeout
+        while time.monotonic() < deadline:
+            # Keep publishing the current target without advancing the ramp.
+            self.spin_for(min(0.05, max(0.0, deadline - time.monotonic())))
+            errors = {arm: self._check_following(arm) for arm in ("left", "right")}
+            for arm, value in errors.items():
+                event["peak_errors_rad"][arm] = round(
+                    max(float(event["peak_errors_rad"][arm]), value), 5
+                )
+            if max(errors.values()) <= resume:
+                event.update({
+                    "status": "recovered",
+                    "duration_s": round(time.monotonic() - started, 3),
+                    "recovered_errors_rad": {
+                        arm: round(value, 5) for arm, value in errors.items()
+                    },
+                })
+                print(
+                    json.dumps({"event": "arm_following_recovered", **event}),
+                    file=sys.stderr, flush=True,
+                )
+                return
+        event.update({
+            "status": "recovery_timeout",
+            "duration_s": round(time.monotonic() - started, 3),
+            "final_errors_rad": {arm: round(value, 5) for arm, value in errors.items()},
+        })
+        print(json.dumps({"event": "arm_following_timeout", **event}), file=sys.stderr, flush=True)
+        worst_arm = max(errors, key=errors.get)
+        raise RuntimeError(
+            f"{worst_arm} following lag did not recover below {resume:.4f} rad "
+            f"within {timeout:.2f}s (final={errors[worst_arm]:.4f} rad)"
+        )
 
     def move_arm_targets(self, arm: str, targets: list[list[float]]) -> None:
         rate = float(self.config["motion"]["publish_rate_hz"])
@@ -469,17 +600,26 @@ class NativeArmGraspCycle:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self.spin_for(0.05)
+            self._check_all_following()
             measured = self.states[arm]
             if measured is not None and max(abs(a - b) for a, b in zip(measured, targets[-1])) <= tolerance:
                 return
-        raise RuntimeError(f"{arm} failed to settle at commanded target")
+        measured = self.states[arm]
+        endpoint_error = (
+            max(abs(a - b) for a, b in zip(measured, targets[-1]))
+            if measured is not None else math.inf
+        )
+        raise RuntimeError(
+            f"{arm} failed to settle at commanded target within {timeout:.2f}s "
+            f"(endpoint_error={endpoint_error:.4f} rad, tolerance={tolerance:.4f} rad)"
+        )
 
     def move_to_joint_posture(self, arm: str, target: list[float]) -> None:
         start = list(self.commanded[arm] or self.states[arm] or [])
         targets = smooth_joint_targets(
             start, target,
             float(self.config["motion"]["publish_rate_hz"]),
-            float(self.config["motion"]["maximum_joint_velocity_rad_s"]),
+            float(self.config["motion"]["posture_joint_velocity_rad_s"]),
         )
         # The interpolation above is already rate-limited; stream it directly.
         rate = float(self.config["motion"]["publish_rate_hz"])
@@ -498,6 +638,7 @@ class NativeArmGraspCycle:
         while time.monotonic() < deadline:
             self.gripper_publisher.publish(message)
             self.spin_for(period)
+            self._check_all_following()
         return self.settled_gripper_feedback(float(self.config["gripper"]["settle_timeout_s"]))
 
     def settled_gripper_feedback(self, timeout_s: float) -> list[float]:
@@ -505,6 +646,7 @@ class NativeArmGraspCycle:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             self.spin_for(0.05)
+            self._check_all_following()
             recent = [values for stamp, values in self.gripper_samples if time.monotonic() - stamp <= 0.5]
             if len(recent) >= 4 and len({len(item) for item in recent}) == 1:
                 array = np.asarray(recent, dtype=float)
@@ -527,6 +669,7 @@ class NativeArmGraspCycle:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             self.spin_for(0.05)
+            self._check_all_following()
             fresh = [(stamp, image) for stamp, image in self.images if stamp > last_stamp]
             for stamp, image in fresh:
                 last_stamp = stamp
@@ -593,6 +736,13 @@ class NativeArmGraspCycle:
             "parameter_profile": self.config["profile_name"],
             "parameter_scope": self.config["parameter_scope"],
             "applied_venue_overrides": self.config.get("applied_venue_overrides", {}),
+            "arm_motion": {
+                key: self.config["motion"][key] for key in (
+                    "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
+                    "following_error_resume_rad", "following_error_pause_rad",
+                    "maximum_following_error_rad", "following_error_recovery_timeout_s",
+                )
+            },
             "selected_descent_m": descent_m,
             "phases_completed": [],
             "visual_alignment": [],

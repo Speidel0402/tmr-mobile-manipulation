@@ -7,6 +7,12 @@ the mission calls MoveAbsolute directly.
 Stop manual publishers to the arm, gripper and base command topics during the
 autonomous run.
 
+The first Hamburg trial showed fresh right-arm tracking that lagged the parking
+ramp. The current code keeps the original ramp and gives the hard following
+guard measured margin. A higher-lag fallback holds the current target while the
+controller catches up. The feedback-age check and final target tolerance remain
+active. No extra override is required for the first retry.
+
 Place the cup, bowl and plate in the normal pickup arrangement, then manually
 place the stopped robot beside the pickup table with clear arm workspace. Run
 the pickup reset first. It moves only the spine, arms and left gripper, saves a
@@ -41,6 +47,17 @@ placement and return:
 Defaults are named Shanghai references. Please send the JSON and images with
 Hamburg room/door/table measurements. Use site-config or edit a copied JSON to
 change only the failed phase's value; do not scale the whole route.
+
+If a posture move still times out, first retry that same command with a slower
+venue override and keep the resulting JSON:
+
+    export TMR_HAMBURG_ARM_POSTURE_VELOCITY_RAD_S=0.05
+    ./deploy/hamburg/run_hamburg.sh pickup-reset --execute \
+      --output /tmp/pickup-reset.json --output-dir /tmp/pickup-reset-evidence
+
+Do not change the wrist calibration, object descent or route for this symptom.
+The report records the resolved speed, following limits, hold/recovery events,
+measured joints and feedback ages.
 
 Phase transitions are printed to the terminal and written atomically to the
 output directory. Please preserve the terminal output as well as the final JSON;

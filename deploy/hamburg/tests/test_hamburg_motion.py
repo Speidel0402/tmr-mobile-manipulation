@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -81,6 +82,91 @@ class HamburgMotionTests(unittest.TestCase):
         values = np.vstack([self.q, stream])
         self.assertLessEqual(float(np.max(np.abs(np.diff(values, axis=0)))), 0.06 / 50.0 + 1.0e-12)
         np.testing.assert_allclose(stream[-1], target)
+
+    def test_posture_move_uses_venue_posture_velocity(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = self.grasp
+        runner.commanded = {"left": list(self.q), "right": list(self.q)}
+        runner.states = {"left": list(self.q), "right": list(self.q)}
+        runner.move_arm_targets = mock.Mock()
+        with mock.patch("hamburg_grasp_cycle.smooth_joint_targets", return_value=[]) as smooth:
+            runner.move_to_joint_posture("left", list(self.q))
+        self.assertEqual(
+            smooth.call_args.args[3],
+            self.grasp["motion"]["posture_joint_velocity_rad_s"],
+        )
+
+    def test_previous_grasp_config_gains_safe_lag_defaults(self) -> None:
+        legacy = json.loads(
+            (ROOT / "config" / "grasp-cycle-shanghai-reference.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for key in (
+            "posture_joint_velocity_rad_s", "following_error_pause_rad",
+            "following_error_resume_rad", "following_error_recovery_timeout_s",
+        ):
+            legacy["motion"].pop(key)
+        legacy["motion"]["maximum_following_error_rad"] = 0.16
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy-grasp.json"
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            loaded = load_cycle_config(path)
+        self.assertEqual(loaded["motion"]["posture_joint_velocity_rad_s"], 0.06)
+        self.assertLess(
+            loaded["motion"]["following_error_resume_rad"],
+            loaded["motion"]["following_error_pause_rad"],
+        )
+        self.assertLess(
+            loaded["motion"]["following_error_pause_rad"],
+            loaded["motion"]["maximum_following_error_rad"],
+        )
+
+    def test_transient_following_lag_holds_and_recovers(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = self.grasp
+        runner.states = {"left": [0.0] * 7, "right": [0.0] * 7}
+        runner.commanded = {"left": [0.0] * 7, "right": [0.21] + [0.0] * 6}
+        runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+        runner.following_lag_events = deque(maxlen=30)
+
+        def catch_up(_duration):
+            runner.states["right"][0] = 0.08
+            runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+
+        runner.spin_for = catch_up
+        runner._check_all_following()
+        self.assertEqual(runner.following_lag_events[-1]["status"], "recovered")
+        self.assertLessEqual(
+            runner.following_lag_events[-1]["recovered_errors_rad"]["right"],
+            self.grasp["motion"]["following_error_resume_rad"],
+        )
+
+    def test_reported_hamburg_lag_does_not_change_normal_timing(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = self.grasp
+        runner.states = {"left": [0.0] * 7, "right": [0.0] * 7}
+        runner.commanded = {"left": [0.0] * 7, "right": [0.1603] + [0.0] * 6}
+        runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+        runner.following_lag_events = deque(maxlen=30)
+        runner._check_all_following()
+        self.assertEqual(list(runner.following_lag_events), [])
+
+    def test_hard_or_persistent_following_error_still_aborts(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.states = {"left": [0.0] * 7, "right": [0.0] * 7}
+        runner.commanded = {"left": [0.0] * 7, "right": [0.25] + [0.0] * 6}
+        runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+        runner.following_lag_events = deque(maxlen=30)
+        with self.assertRaisesRegex(RuntimeError, "hard limit"):
+            runner._check_all_following()
+
+        runner.commanded["right"][0] = 0.21
+        runner.config["motion"]["following_error_recovery_timeout_s"] = 1.0e-9
+        with self.assertRaisesRegex(RuntimeError, "did not recover"):
+            runner._check_all_following()
+        self.assertEqual(runner.following_lag_events[-1]["status"], "recovery_timeout")
 
     def test_visual_mapping_points_toward_configured_target(self) -> None:
         point = (340.0, 205.0)
@@ -183,6 +269,11 @@ class HamburgMotionTests(unittest.TestCase):
         runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
         runner.images = deque([(1, object())], maxlen=20)
         runner.image_at = 0.0
+        runner.config = self.grasp
+        runner.states = {"left": [0.0] * 7, "right": [0.0] * 7}
+        runner.commanded = {"left": [0.0] * 7, "right": [0.0] * 7}
+        runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+        runner.following_lag_events = deque(maxlen=30)
         calls = 0
 
         def spin(_duration):
@@ -225,6 +316,8 @@ class HamburgMotionTests(unittest.TestCase):
             "TMR_HAMBURG_SPINE_HOME_M": "0.65",
             "TMR_HAMBURG_HEAD_CAMERA_WIDTH": "1280",
             "TMR_HAMBURG_HEAD_CAMERA_HEIGHT": "720",
+            "TMR_HAMBURG_ARM_POSTURE_VELOCITY_RAD_S": "0.03",
+            "TMR_HAMBURG_ARM_MAXIMUM_FOLLOWING_ERROR_RAD": "0.22",
         }):
             venue = load_config(ROOT / "config" / "venue.json")
         grasp = resolve_cycle_venue_overrides(self.grasp, venue)
@@ -232,6 +325,8 @@ class HamburgMotionTests(unittest.TestCase):
         self.assertEqual(grasp["topics"]["left_gripper_target"], "/venue/left_gripper")
         self.assertEqual(grasp["gripper"]["open"], 0.9)
         self.assertEqual(grasp["spine"]["initial_target_m"], 0.65)
+        self.assertEqual(grasp["motion"]["posture_joint_velocity_rad_s"], 0.03)
+        self.assertEqual(grasp["motion"]["maximum_following_error_rad"], 0.22)
         self.assertEqual((mission["head_camera"]["width"], mission["head_camera"]["height"]),
                          (1280, 720))
 

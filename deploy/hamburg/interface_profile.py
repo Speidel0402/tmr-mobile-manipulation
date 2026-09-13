@@ -79,6 +79,24 @@ def validate_interface_profile(profile: dict[str, Any]) -> None:
     camera = profile["head_camera"]
     if int(camera["width"]) <= 0 or int(camera["height"]) <= 0:
         raise ValueError("head camera dimensions must be positive")
+    arm_motion = profile["arm_motion"]
+    for field in (
+        "posture_joint_velocity_rad_s", "maximum_following_error_rad",
+        "following_error_pause_rad", "following_error_resume_rad",
+        "following_error_recovery_timeout_s",
+    ):
+        value = float(arm_motion[field])
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"arm_motion.{field} must be positive and finite")
+    if not (
+        float(arm_motion["following_error_resume_rad"])
+        < float(arm_motion["following_error_pause_rad"])
+        < float(arm_motion["maximum_following_error_rad"])
+        <= 0.35
+    ):
+        raise ValueError(
+            "arm_motion following-error limits must satisfy resume < pause < maximum <= 0.35"
+        )
 
 
 def apply_interface_profile(

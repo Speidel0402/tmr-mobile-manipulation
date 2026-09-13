@@ -13,14 +13,22 @@
   },
   "dds": {
     "ROS_DOMAIN_ID": "0",
-    "ROS_LOCALHOST_ONLY_allowed": [null, "", "0"],
+    "ROS_LOCALHOST_ONLY_allowed": [
+      null,
+      "",
+      "0"
+    ],
     "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
     "profile_environment_variable": "FASTRTPS_DEFAULT_PROFILES_FILE"
   },
   "strategy": {
     "stage": "EBiM Task 3 Phase 2 Stage 1",
     "source_commit": "53e4909879716868f57fa3e315ef8ded75124a90",
-    "object_order": ["cup", "bowl", "plate"],
+    "object_order": [
+      "cup",
+      "bowl",
+      "plate"
+    ],
     "destination_mapping": {
       "cup": "B",
       "bowl": "A",
@@ -34,21 +42,27 @@
     {
       "name": "left_arm_joint_state",
       "topic": "/left/franka_robot_state_broadcaster/measured_joint_states",
-      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "accepted_types": [
+        "sensor_msgs/msg/JointState"
+      ],
       "qos": "sensor",
       "required": true
     },
     {
       "name": "right_arm_joint_state",
       "topic": "/right/franka_robot_state_broadcaster/measured_joint_states",
-      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "accepted_types": [
+        "sensor_msgs/msg/JointState"
+      ],
       "qos": "sensor",
       "required": true
     },
     {
       "name": "left_gripper_joint_state",
       "topic": "/left/gripper/joint_states",
-      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "accepted_types": [
+        "sensor_msgs/msg/JointState"
+      ],
       "qos": "sensor",
       "required": true
     },
@@ -69,7 +83,9 @@
     {
       "name": "right_gripper_joint_state",
       "topic": "/right/gripper/joint_states",
-      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "accepted_types": [
+        "sensor_msgs/msg/JointState"
+      ],
       "qos": "sensor",
       "required": true
     },
@@ -88,72 +104,66 @@
       "required": false
     },
     {
-      "name": "spine_joint_state",
-      "topic": "/spine/joint_states",
-      "accepted_types": ["sensor_msgs/msg/JointState"],
-      "qos": "sensor",
-      "required": true
-    },
-    {
-      "name": "mobile_base_pose",
-      "topic": "/mobile_base/pose",
-      "accepted_types": [],
-      "qos": "sensor",
-      "required": true
-    },
-    {
-      "name": "mobile_base_twist",
-      "topic": "/mobile_base/twist",
-      "accepted_types": [],
-      "qos": "sensor",
-      "required": true
-    },
-    {
       "name": "mobile_base_odometry",
       "topic": "/swerve_drive_controller/odom",
-      "accepted_types": ["nav_msgs/msg/Odometry"],
+      "accepted_types": [
+        "nav_msgs/msg/Odometry"
+      ],
       "qos": "sensor",
       "required": true
     },
     {
       "name": "mobile_base_command_output",
       "topic": "/swerve_drive_controller/cmd_vel_out",
-      "accepted_types": ["geometry_msgs/msg/TwistStamped", "geometry_msgs/msg/Twist"],
+      "accepted_types": [
+        "geometry_msgs/msg/TwistStamped",
+        "geometry_msgs/msg/Twist"
+      ],
       "qos": "sensor",
       "required": false
     },
     {
       "name": "front_lidar",
       "topic": "/lidar_front/scan",
-      "accepted_types": ["sensor_msgs/msg/LaserScan"],
+      "accepted_types": [
+        "sensor_msgs/msg/LaserScan"
+      ],
       "qos": "sensor",
       "required": true
     },
     {
       "name": "rear_lidar",
       "topic": "/lidar_rear/scan",
-      "accepted_types": ["sensor_msgs/msg/LaserScan"],
+      "accepted_types": [
+        "sensor_msgs/msg/LaserScan"
+      ],
       "qos": "sensor",
       "required": true
     },
     {
       "name": "left_wrist_camera",
       "topic": "/wrist_camera_left/camera/color/image_raw",
-      "accepted_types": ["sensor_msgs/msg/Image"],
+      "accepted_types": [
+        "sensor_msgs/msg/Image"
+      ],
       "qos": "sensor",
       "required": true
     },
     {
       "name": "right_wrist_camera",
       "topic": "/wrist_camera_right/camera/color/image_raw",
-      "accepted_types": ["sensor_msgs/msg/Image"],
+      "accepted_types": [
+        "sensor_msgs/msg/Image"
+      ],
       "qos": "sensor",
       "required": true
     },
     {
       "name": "head_camera",
       "topic": "/head_camera/zed_node/rgb/color/rect/image",
-      "accepted_types": ["sensor_msgs/msg/Image"],
+      "accepted_types": [
+        "sensor_msgs/msg/Image"
+      ],
       "qos": "sensor",
       "required": true,
       "expected_encoding": "bgr8",
@@ -163,14 +173,18 @@
     {
       "name": "tf",
       "topic": "/tf",
-      "accepted_types": ["tf2_msgs/msg/TFMessage"],
+      "accepted_types": [
+        "tf2_msgs/msg/TFMessage"
+      ],
       "qos": "sensor",
       "required": true
     },
     {
       "name": "tf_static",
       "topic": "/tf_static",
-      "accepted_types": ["tf2_msgs/msg/TFMessage"],
+      "accepted_types": [
+        "tf2_msgs/msg/TFMessage"
+      ],
       "qos": "transient_local",
       "required": true
     },
@@ -193,13 +207,17 @@
     {
       "name": "left_arm_joint_target",
       "topic": "/left/gello/joint_states",
-      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "accepted_types": [
+        "sensor_msgs/msg/JointState"
+      ],
       "required": true
     },
     {
       "name": "right_arm_joint_target",
       "topic": "/right/gello/joint_states",
-      "accepted_types": ["sensor_msgs/msg/JointState"],
+      "accepted_types": [
+        "sensor_msgs/msg/JointState"
+      ],
       "required": true
     },
     {
@@ -227,17 +245,9 @@
     {
       "name": "mobile_base_velocity",
       "topic": "/swerve_drive_controller/cmd_vel",
-      "accepted_types": ["geometry_msgs/msg/TwistStamped", "geometry_msgs/msg/Twist"],
-      "required": true
-    },
-    {
-      "name": "spine_height_target",
-      "topic": "/spine/target_height",
-      "accepted_types": [],
-      "semantics_to_confirm": [
-        "whether the value is an absolute target",
-        "whether the unit is metres",
-        "minimum and maximum accepted height"
+      "accepted_types": [
+        "geometry_msgs/msg/TwistStamped",
+        "geometry_msgs/msg/Twist"
       ],
       "required": true
     }
@@ -250,8 +260,6 @@
     "/right/action_server/ptp_motion",
     "/left/gripper/robotiq_gripper_controller/gripper_cmd",
     "/right/gripper/robotiq_gripper_controller/gripper_cmd",
-    "/franka_spine_node/get_position",
-    "/franka_spine_node/move_absolute",
     "/tmr_cycle/mission_cmd_vel"
   ]
 }

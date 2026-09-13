@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 from pathlib import Path
@@ -159,6 +160,64 @@ def qos_profile(name: str):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
     raise ValueError(f"unsupported QoS profile {name!r}")
+
+
+def probe_native_spine(node: Any, config: dict[str, Any], timeout_s: float) -> tuple[dict[str, Any], list[str]]:
+    """Check the native server and read position; never send an action goal."""
+    service_spec = config["service_endpoints"][0]
+    action_spec = config["action_endpoints"][0]
+    service_name = service_spec["service"]
+    action_name = action_spec["action"]
+    service_type_name = service_spec["accepted_types"][0]
+    action_type_name = action_spec["accepted_types"][0]
+    report: dict[str, Any] = {
+        "service": {"name": service_name, "expected_type": service_type_name, "ready": False},
+        "action": {"name": action_name, "expected_type": action_type_name, "ready": False},
+    }
+    errors: list[str] = []
+    try:
+        import rclpy
+        from rclpy.action import ActionClient
+        from rosidl_runtime_py.utilities import get_action, get_service
+
+        service_type = get_service(service_type_name)
+        action_type = get_action(action_type_name)
+    except Exception as exc:
+        errors.append(f"native spine interface package unavailable: {exc!r}")
+        return report, errors
+    service_client = node.create_client(service_type, service_name)
+    action_client = ActionClient(node, action_type, action_name)
+    try:
+        budget = max(0.1, min(timeout_s, 2.0))
+        report["service"]["ready"] = bool(service_client.wait_for_service(timeout_sec=budget))
+        report["action"]["ready"] = bool(action_client.wait_for_server(timeout_sec=budget))
+        discovered_services = dict(node.get_service_names_and_types())
+        report["service"]["discovered_types"] = discovered_services.get(service_name, [])
+        if service_type_name not in discovered_services.get(service_name, []):
+            errors.append(f"spine service missing or type mismatch: {service_name} ({service_type_name})")
+        report["action"]["goal_fields"] = dict(action_type.Goal.get_fields_and_field_types())
+        required_goal_fields = {"position", "velocity", "acceleration", "deceleration"}
+        if not required_goal_fields.issubset(report["action"]["goal_fields"]):
+            errors.append("native spine action goal lacks the Shanghai-required fields")
+        if not report["service"]["ready"]:
+            errors.append(f"native spine position service unavailable: {service_name}")
+        if not report["action"]["ready"]:
+            errors.append(f"native spine action unavailable: {action_name} ({action_type_name})")
+        if report["service"]["ready"]:
+            future = service_client.call_async(service_type.Request())
+            rclpy.spin_until_future_complete(node, future, timeout_sec=budget)
+            response = future.result() if future.done() else None
+            if response is None or not bool(getattr(response, "success", False)):
+                errors.append(f"native spine position query failed: {service_name}")
+            else:
+                position = float(response.position)
+                report["service"]["position_m"] = position
+                if not math.isfinite(position):
+                    errors.append("native spine position is not finite")
+    finally:
+        node.destroy_client(service_client)
+        action_client.destroy()
+    return report, errors
 
 
 def ros_graph_report(
@@ -319,13 +378,18 @@ def ros_graph_report(
             if spec["required"] and subscriber_count < 1:
                 errors.append(f"no controller subscribes to command topic: {topic}")
 
+        spine_report = None
+        if config.get("action_endpoints"):
+            spine_report, spine_errors = probe_native_spine(node, config, timeout_s)
+            errors.extend(spine_errors)
+
         return {
             "node_name": node.get_fully_qualified_name(),
             "single_ros_participant": True,
             "streams": stream_results,
             "command_endpoints": command_results,
             "service_count": len(node.get_service_names_and_types()),
-            "action_contract": "not assumed by Hamburg package",
+            "native_spine": spine_report,
         }, errors
     finally:
         node.destroy_node()

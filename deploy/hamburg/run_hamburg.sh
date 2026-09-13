@@ -10,8 +10,8 @@ case "${MODE}" in
     exec python3 "${SCRIPT_DIR}/hamburg_preflight.py" "$@"
     ;;
   mission)
-    echo "Hamburg mission is intentionally locked: the submitted Shanghai mission creates ROS nodes during active motion and depends on undocumented MoveIt/PTP/spine interfaces." >&2
-    echo "Run '${SCRIPT_DIR}/run_hamburg.sh check' and provide the JSON report before enabling physical motion." >&2
+    echo "Hamburg mission is locked: the Shanghai pickup, transport, and placement scripts create ROS participants during motion and depend on motion/camera interfaces not established on this venue." >&2
+    echo "The native-interface check is read-only and cannot unlock physical motion; a single-node Hamburg mission and supervised grasp tests are still required." >&2
     exit 3
     ;;
   *)

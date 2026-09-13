@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "profile_name": "shanghai-validated-defaults",
+  "profile_name": "hamburg-native-action-defaults",
   "gripper": {
     "left_topic": "/left/gripper/gripper_client/target_gripper_width_percent",
     "right_topic": "/right/gripper/gripper_client/target_gripper_width_percent",
@@ -25,7 +25,12 @@
     "minimum_m": 0.0,
     "maximum_m": 0.8,
     "home_m": 0.7,
-    "provenance": "Shanghai validated absolute home height is 0.7 m; Float32 is the Hamburg scalar-topic default and can be overridden without changing strategy code."
+    "provenance": "Hamburg organizer confirms MoveAbsolute plus get_position. Shanghai source establishes goal.position, velocity, acceleration, deceleration and 0.7 m home target.",
+    "interface": "action",
+    "action_name": "/franka_spine_node/move_absolute",
+    "action_type": "franka_spine_msgs/action/MoveAbsolute",
+    "position_service": "/franka_spine_node/get_position",
+    "position_service_type": "franka_spine_msgs/srv/GetPosition"
   },
   "environment_overrides": {
     "TMR_HAMBURG_LEFT_GRIPPER_TOPIC": "gripper.left_topic",
@@ -37,6 +42,17 @@
     "TMR_HAMBURG_SPINE_TOPIC": "spine.topic",
     "TMR_HAMBURG_SPINE_MESSAGE_TYPE": "spine.message_type",
     "TMR_HAMBURG_SPINE_FIELD": "spine.field",
-    "TMR_HAMBURG_SPINE_HOME_M": "spine.home_m"
+    "TMR_HAMBURG_SPINE_HOME_M": "spine.home_m",
+    "TMR_HAMBURG_SPINE_INTERFACE": "spine.interface",
+    "TMR_HAMBURG_SPINE_ACTION_NAME": "spine.action_name",
+    "TMR_HAMBURG_SPINE_POSITION_SERVICE": "spine.position_service",
+    "TMR_HAMBURG_HEAD_CAMERA_WIDTH": "head_camera.width",
+    "TMR_HAMBURG_HEAD_CAMERA_HEIGHT": "head_camera.height"
+  },
+  "head_camera": {
+    "width": 640,
+    "height": 360,
+    "zed_pub_downscale_factor": 2.0,
+    "provenance": "Hamburg ZED HD720 output is 1280x720 by default; organizer preflight confirmed 640x360 with pub_downscale_factor:=2.0."
   }
 }

@@ -47,7 +47,7 @@ def load_interface_profile(
 def validate_interface_profile(profile: dict[str, Any]) -> None:
     gripper = profile["gripper"]
     spine = profile["spine"]
-    for label, section in (("gripper", gripper), ("spine", spine)):
+    for label, section in (("gripper", gripper),):
         if "/msg/" not in str(section["message_type"]):
             raise ValueError(f"{label}.message_type must be a ROS message type")
         if not str(section["field"]).strip():
@@ -63,6 +63,22 @@ def validate_interface_profile(profile: dict[str, Any]) -> None:
         spine["maximum_m"]
     ):
         raise ValueError("spine.home_m is outside the configured range")
+    interface = spine["interface"]
+    if interface == "action":
+        if "/action/" not in spine["action_type"] or "/srv/" not in spine["position_service_type"]:
+            raise ValueError("spine action and position service must have ROS interface types")
+        if not spine["action_name"].startswith("/") or not spine["position_service"].startswith("/"):
+            raise ValueError("spine action and position service require absolute names")
+    elif interface == "topic":
+        if "/msg/" not in spine["message_type"] or not spine["field"]:
+            raise ValueError("spine topic requires a ROS message type and field")
+        if not spine["topic"].startswith("/"):
+            raise ValueError("spine topic requires an absolute name")
+    else:
+        raise ValueError(f"unsupported spine interface {interface!r}")
+    camera = profile["head_camera"]
+    if int(camera["width"]) <= 0 or int(camera["height"]) <= 0:
+        raise ValueError("head camera dimensions must be positive")
 
 
 def apply_interface_profile(
@@ -88,8 +104,13 @@ def apply_interface_profile(
                 },
             }
         )
-    commands["spine_height_target"].update(
-        {
+    commands.pop("spine_height_target", None)
+    resolved["command_endpoints"] = list(commands.values())
+    resolved["service_endpoints"] = []
+    resolved["action_endpoints"] = []
+    if spine["interface"] == "topic":
+        resolved["command_endpoints"].append({
+            "name": "spine_height_target",
             "topic": spine["topic"],
             "accepted_types": [spine["message_type"]],
             "message_field": spine["field"],
@@ -98,7 +119,24 @@ def apply_interface_profile(
                 "unit": spine["unit"],
                 "absolute": bool(spine["absolute"]),
             },
-        }
-    )
+            "required": True,
+        })
+    else:
+        resolved["service_endpoints"].append({
+            "name": "spine_position",
+            "service": spine["position_service"],
+            "accepted_types": [spine["position_service_type"]],
+            "required": True,
+        })
+        resolved["action_endpoints"].append({
+            "name": "spine_height_target",
+            "action": spine["action_name"],
+            "accepted_types": [spine["action_type"]],
+            "required": True,
+        })
+    for stream in resolved["streams"]:
+        if stream["name"] == "head_camera":
+            stream["expected_width"] = int(profile["head_camera"]["width"])
+            stream["expected_height"] = int(profile["head_camera"]["height"])
     resolved["interface_profile"] = profile
     return resolved

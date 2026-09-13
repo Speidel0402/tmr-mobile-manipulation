@@ -28,11 +28,12 @@ The cup, food-bowl, and plate pick/place actions are also available as
 The evaluator-facing Hamburg deployment package is isolated under
 [`deploy/hamburg/`](deploy/hamburg/README.md).  It targets the documented
 arm64 Ubuntu 22.04 / ROS 2 Humble companion environment and preserves the
-validated Stage 1 policy.  Gripper, lifting-column, DDS, and camera differences
-are handled through a venue profile and read-only preflight rather than by
-changing the task strategy.
+validated Stage 1 policy. The read-only preflight now checks Hamburg's native
+odometry and spine action/service directly, with an explicit ZED downscale
+requirement. Physical Hamburg mission execution remains locked until the
+Shanghai multi-process motion code is ported and validated on the venue.
 
-## System requirements
+## Shanghai demonstrated system requirements
 
 | Component | Environment | Role |
 | --- | --- | --- |

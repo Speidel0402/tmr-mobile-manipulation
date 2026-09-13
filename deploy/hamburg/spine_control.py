@@ -19,6 +19,7 @@ class SpineControl:
 
         self.node = node
         self.profile = profile
+        self.errors: list[str] = []
         self.action_type = get_action(profile["action_type"])
         self.service_type = get_service(profile["position_service_type"])
         self.position_client = node.create_client(
@@ -31,6 +32,14 @@ class SpineControl:
     def close(self) -> None:
         self.node.destroy_client(self.position_client)
         self.action_client.destroy()
+
+    def diagnostic_snapshot(self) -> dict[str, Any]:
+        return {
+            "interface": self.profile["interface"],
+            "action_name": self.profile["action_name"],
+            "position_service": self.profile["position_service"],
+            "errors": list(self.errors),
+        }
 
     def _wait(self, future: Any, timeout_s: float) -> Any:
         import rclpy
@@ -85,7 +94,12 @@ class SpineControl:
         try:
             wrapped = self._wait(handle.get_result_async(), timeout_s)
         except TimeoutError:
-            self._wait(handle.cancel_goal_async(), 5.0)
+            try:
+                self._wait(handle.cancel_goal_async(), 5.0)
+            except BaseException as cancel_exc:
+                detail = f"spine timeout cancellation failed: {type(cancel_exc).__name__}: {cancel_exc}"
+                self.errors.append(detail)
+                self.node.get_logger().error(detail)
             raise
         from action_msgs.msg import GoalStatus
 

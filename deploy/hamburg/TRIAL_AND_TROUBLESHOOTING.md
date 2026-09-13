@@ -5,6 +5,12 @@ last completed phase, selected configuration, measured feedback, and exact
 failure. Change the parameter related to that phase and repeat the same utensil
 before continuing.
 
+The physical entrypoints print every phase to standard error and atomically
+replace a progress JSON at each phase transition. A final report is attempted on
+success, failure, or operator interruption. Evidence-image write failures are
+reported as warnings and do not interrupt otherwise valid motion. Safety faults
+still stop the base and prevent the next phase.
+
 | Failure or symptom | Check | Fast, local change |
 | --- | --- | --- |
 | Environment/preflight failure | Domain 0, `rmw_fastrtps_cpp`, UDP-only profile, native topic types and spine action/service | Correct the sourced Hamburg environment. Do not source Shanghai domain 97/Jazzy launchers. |
@@ -15,6 +21,7 @@ before continuing.
 | Descent reaches limit or misses utensil | Exact object, top pose, tabletop/object height, last joints and clearance | Change only that object's `descent_m` in a copied grasp JSON, initially in small measured increments. Do not apply one table-height delta to all utensils automatically. |
 | Close occurs but contact check fails | Empty-close, object-close and after-lift gripper joint vectors | Check utensil position and finger feedback. Adjust `minimum_contact_delta_from_empty_closed` only from repeated empty/object measurements, not to force a pass. |
 | Spine action fails | Action name/type, goal rejection/result and measured `GetPosition` value | Correct confirmed action/service names in the interface profile. For a new physical height, set `--spine-m` with `site-config`. |
+| Spine Python interface is unavailable | `franka_spine_msgs` import/type-support error before any motion | Source the organizer's Humble workspace that provides `franka_spine_msgs` before running. A container used for physical execution must include or mount the same compatible interface package. |
 | Full check fails only on head image | Raw Hamburg topic is fresh 640×360 `bgr8`; `camera_info` matches | Use ZED `pub_resolution: CUSTOM` with downscale factor `2.0`, or change both validation and mission camera configuration to the measured output. Wrist grasp settings stay 640×480. |
 | Letter confidence falls after head downsampling | Saved 640×360 evidence image and false proposals | Improve view/lighting first. Then adjust the normalized detector threshold in the mission JSON from venue frames; card centres and drawings already use the resized frame coordinates. |
 | Base route fails at a named segment | Segment report, requested/actual odometry, Hamburg door/table measurement and LiDAR range | Modify the matching named segment in the site mission JSON. Room size, door clearance, table standoff and letter spacing are independent; never apply a global scale. |

@@ -33,3 +33,8 @@ placement and return:
 Defaults are named Shanghai references. Please send the JSON and images with
 Hamburg room/door/table measurements. Use site-config or edit a copied JSON to
 change only the failed phase's value; do not scale the whole route.
+
+Phase transitions are printed to the terminal and written atomically to the
+output directory. Please preserve the terminal output as well as the final JSON;
+if recovery or report writing also fails, both the original and secondary errors
+are retained.

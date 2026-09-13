@@ -16,8 +16,11 @@ RUN apt-get update \
 WORKDIR /opt/tmr-task3
 COPY deploy/hamburg/ /opt/tmr-task3/deploy/hamburg/
 COPY grasp/scripts/cup_rim_detector.py grasp/scripts/detect_food_bowl.py grasp/scripts/detect_plate.py /opt/tmr-task3/grasp/scripts/
+COPY base/scripts/letter_card_vision.py /opt/tmr-task3/base/scripts/letter_card_vision.py
 RUN chmod +x /opt/tmr-task3/deploy/hamburg/run_hamburg.sh \
-    && python3 -m compileall -q /opt/tmr-task3/deploy/hamburg /opt/tmr-task3/grasp/scripts
+    && python3 -m compileall -q /opt/tmr-task3/deploy/hamburg /opt/tmr-task3/grasp/scripts /opt/tmr-task3/base/scripts \
+    && python3 /opt/tmr-task3/deploy/hamburg/hamburg_grasp_cycle.py --object cup >/dev/null \
+    && python3 /opt/tmr-task3/deploy/hamburg/hamburg_mission.py >/dev/null
 
 ENTRYPOINT ["/ros_entrypoint.sh", "/opt/tmr-task3/deploy/hamburg/run_hamburg.sh"]
 CMD ["check"]

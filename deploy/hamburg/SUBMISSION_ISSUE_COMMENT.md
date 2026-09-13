@@ -26,8 +26,9 @@ grasps only the selected utensil. This test does not move the mobile base.
 ```
 
 Please reset the utensil arrangement between runs. If a trial fails, please
-send its JSON report and saved wrist image; these identify whether the problem
-is the reset view, perception, arm response or gripper feedback.
+send its terminal output, JSON report and saved wrist image; these identify
+whether the problem is the reset view, perception, arm response or gripper
+feedback.
 
 ## 2. Complete closed-loop mission
 
@@ -58,6 +59,6 @@ start, travel route and letter-station layout may all differ from Shanghai and
 must be checked independently.
 
 If the stationary grasps pass but the complete mission fails, please send the
-mission JSON, evidence images and the relevant Hamburg room/table/door
+terminal output, mission JSON, evidence images and the relevant Hamburg room/table/door
 measurements. We can then adjust the affected mission phase directly instead of
 applying one global scale factor or changing the already working grasp setup.

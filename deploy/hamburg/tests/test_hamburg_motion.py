@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from collections import deque
+from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -12,8 +17,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hamburg_grasp_cycle import alignment_delta_m, load_cycle_config, plan_report as grasp_plan
-from hamburg_mission import plan_report as mission_plan, validate_mission_config
+from hamburg_grasp_cycle import (
+    alignment_delta_m,
+    load_cycle_config,
+    plan_report as grasp_plan,
+    resolve_cycle_venue_overrides,
+    validate_cycle_venue_consistency,
+)
+from hamburg_mission import (
+    HamburgMission,
+    NativeBaseControl,
+    plan_report as mission_plan,
+    resolve_mission_venue_overrides,
+    validate_combined_configs,
+    validate_mission_config,
+    validate_mission_venue_consistency,
+)
 from hamburg_motion_core import (
     FR3V2_JOINT_LIMITS_RAD,
     base_relative_pose,
@@ -22,6 +41,7 @@ from hamburg_motion_core import (
     gripper_contact_report,
     smooth_joint_targets,
 )
+from hamburg_preflight import load_config
 
 
 class HamburgMotionTests(unittest.TestCase):
@@ -93,6 +113,116 @@ class HamburgMotionTests(unittest.TestCase):
         self.assertIn('hamburg_mission.py', launcher)
         self.assertNotIn('physical grasp test is locked', launcher)
         self.assertNotIn('mission is locked', launcher)
+
+    def test_runtime_profiles_must_match_resolved_venue_interfaces(self) -> None:
+        venue = load_config(ROOT / "config" / "venue.json")
+        validate_cycle_venue_consistency(self.grasp, venue)
+        validate_mission_venue_consistency(self.mission, venue)
+        changed_grasp = deepcopy(self.grasp)
+        changed_grasp["topics"]["left_joint_target"] = "/wrong/arm/target"
+        with self.assertRaisesRegex(ValueError, "grasp/venue interface mismatch"):
+            validate_cycle_venue_consistency(changed_grasp, venue)
+        changed_mission = deepcopy(self.mission)
+        changed_mission["topics"]["odometry"] = "/wrong/odom"
+        with self.assertRaisesRegex(ValueError, "mission/venue interface mismatch"):
+            validate_mission_venue_consistency(changed_mission, venue)
+
+    def test_mission_and_grasp_assignments_cannot_drift(self) -> None:
+        validate_combined_configs(self.mission, self.grasp)
+        changed = deepcopy(self.mission)
+        changed["assignment"]["cup"] = "C"
+        with self.assertRaisesRegex(ValueError, "assignments differ"):
+            validate_combined_configs(changed, self.grasp)
+
+    def test_explicit_environment_overrides_reach_runtime_configs(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "TMR_HAMBURG_LEFT_GRIPPER_TOPIC": "/venue/left_gripper",
+            "TMR_HAMBURG_GRIPPER_OPEN": "0.9",
+            "TMR_HAMBURG_SPINE_HOME_M": "0.65",
+            "TMR_HAMBURG_HEAD_CAMERA_WIDTH": "1280",
+            "TMR_HAMBURG_HEAD_CAMERA_HEIGHT": "720",
+        }):
+            venue = load_config(ROOT / "config" / "venue.json")
+        grasp = resolve_cycle_venue_overrides(self.grasp, venue)
+        mission = resolve_mission_venue_overrides(self.mission, venue)
+        self.assertEqual(grasp["topics"]["left_gripper_target"], "/venue/left_gripper")
+        self.assertEqual(grasp["gripper"]["open"], 0.9)
+        self.assertEqual(grasp["spine"]["initial_target_m"], 0.65)
+        self.assertEqual((mission["head_camera"]["width"], mission["head_camera"]["height"]),
+                         (1280, 720))
+
+    def test_full_mission_restores_pickup_view_before_every_object(self) -> None:
+        class Arm:
+            def __init__(self):
+                self.moves = []
+
+            def wait_live(self, _timeout):
+                return None
+
+            def assert_controller_graph(self):
+                return {}
+
+            def move_to_joint_posture(self, arm, target):
+                self.moves.append((arm, list(target)))
+
+        class Base:
+            def __init__(self):
+                self.active_stage = None
+                self.stops = 0
+
+            def wait_ready(self):
+                return None
+
+            def run_stages(self, _stages):
+                return []
+
+            def search_letter(self, target, _output):
+                return {"target": target, "row": "near", "measured_right_m": 0.5}
+
+            def stop(self, _seconds=0.5):
+                self.stops += 1
+
+        class Spine:
+            def move_absolute(self, target):
+                return {"target_position_m": target}
+
+        arm, base = Arm(), Base()
+        with tempfile.TemporaryDirectory() as directory:
+            runner = HamburgMission(arm, base, Spine(), self.mission, self.grasp, Path(directory))
+            runner.pick = mock.Mock(side_effect=lambda name: ({"object": name}, list(self.q)))
+            runner.place = mock.Mock(side_effect=lambda _q, row, name: {"object": name, "row": row})
+            report = runner.run()
+        left_moves = [target for arm_name, target in arm.moves if arm_name == "left"]
+        self.assertEqual(len(left_moves), 1 + len(("cup", "bowl", "plate")))
+        for target in left_moves:
+            self.assertEqual(target, self.grasp["posture"]["left_pick_top_rad"])
+        self.assertEqual(report["status"], "complete")
+
+    def test_base_wrappers_publish_stop_when_operation_raises(self) -> None:
+        base = NativeBaseControl.__new__(NativeBaseControl)
+        base.active_stage = None
+        base.stage_history = deque(maxlen=30)
+        base.stop = mock.Mock()
+        base._search_letter = mock.Mock(side_effect=RuntimeError("camera failed"))
+        with self.assertRaisesRegex(RuntimeError, "camera failed"):
+            base.search_letter("A", Path("unused.png"))
+        base.stop.assert_called_once()
+
+        base.stop.reset_mock()
+        base.active_stage = None
+        base.stage_history = deque(maxlen=30)
+        base.translate = mock.Mock(side_effect=RuntimeError("odometry failed"))
+        with self.assertRaisesRegex(RuntimeError, "odometry failed"):
+            base.run_stages([{"name": "test", "kind": "translate",
+                              "forward_m": 1.0, "left_m": 0.0}])
+        base.stop.assert_called_once()
+        self.assertEqual(base.stage_history[-1]["status"], "failed")
+
+        base.stop = mock.Mock(side_effect=RuntimeError("zero publish failed"))
+        base._search_letter = mock.Mock(side_effect=RuntimeError("original camera failure"))
+        with self.assertRaisesRegex(RuntimeError, "original camera failure"):
+            base.search_letter("A", Path("unused.png"))
+        self.assertEqual(base.stage_history[-1]["status"], "stop_failed")
 
 
 if __name__ == "__main__":

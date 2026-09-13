@@ -460,6 +460,7 @@ class HamburgPackageTests(unittest.TestCase):
         self.assertIn("ros:humble-ros-base-jammy", dockerfile)
         self.assertIn("python3-opencv", dockerfile)
         self.assertIn("grasp/scripts/cup_rim_detector.py", dockerfile)
+        self.assertIn("base/scripts/letter_card_vision.py", dockerfile)
         self.assertNotIn("python:3.11", dockerfile)
 
 

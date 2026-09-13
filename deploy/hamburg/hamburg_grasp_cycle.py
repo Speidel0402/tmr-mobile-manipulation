@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from copy import deepcopy
 import json
 import math
 import os
 from pathlib import Path
+import sys
 import time
+import traceback
 from typing import Any
 
 import numpy as np
@@ -39,15 +42,161 @@ OBJECTS = ("cup", "bowl", "plate")
 
 def load_cycle_config(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    required = {"topics", "joint_names", "posture", "motion", "vision", "spine", "gripper", "objects"}
+    required = {
+        "profile_name", "parameter_scope", "arm_command_interface", "topics",
+        "joint_names", "posture", "motion", "vision", "spine", "gripper", "objects",
+    }
     missing = sorted(required - data.keys())
     if missing:
         raise ValueError(f"grasp-cycle config is missing: {', '.join(missing)}")
+    required_topics = {
+        "left_joint_state", "right_joint_state", "left_joint_target", "right_joint_target",
+        "left_gripper_state", "left_gripper_target", "left_wrist_image",
+    }
+    missing_topics = sorted(required_topics - data["topics"].keys())
+    if missing_topics:
+        raise ValueError("grasp-cycle topics are missing: " + ", ".join(missing_topics))
+    for name, topic in data["topics"].items():
+        if not isinstance(topic, str) or not topic.startswith("/"):
+            raise ValueError(f"topics.{name} must be an absolute ROS topic")
+    for arm in ("left", "right"):
+        names = data["joint_names"][arm]
+        if len(names) != 7 or len(set(names)) != 7 or not all(isinstance(name, str) and name for name in names):
+            raise ValueError(f"joint_names.{arm} must contain seven unique names")
+    for label, arm in (("left_pick_top_rad", "left"), ("right_parking_rad", "right")):
+        values = np.asarray(data["posture"][label], dtype=float)
+        if values.shape != (7,) or not np.all(np.isfinite(values)):
+            raise ValueError(f"posture.{label} must contain seven finite joints")
+        if np.any(values <= FR3V2_JOINT_LIMITS_RAD[:, 0]) or np.any(values >= FR3V2_JOINT_LIMITS_RAD[:, 1]):
+            raise ValueError(f"posture.{label} violates official FR3v2 joint limits")
+    quaternion = np.asarray(data["posture"]["left_tool_quaternion_xyzw"], dtype=float)
+    if quaternion.shape != (4,) or not np.all(np.isfinite(quaternion)) or np.linalg.norm(quaternion) < 1.0e-6:
+        raise ValueError("posture.left_tool_quaternion_xyzw must be a non-zero finite quaternion")
+    positive_motion = (
+        "publish_rate_hz", "maximum_joint_velocity_rad_s", "maximum_following_error_rad",
+        "endpoint_tolerance_rad", "endpoint_timeout_s", "cartesian_waypoint_step_m",
+        "maximum_visual_xy_travel_m", "maximum_visual_step_m",
+    )
+    for field in positive_motion:
+        value = float(data["motion"][field])
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"motion.{field} must be positive and finite")
+    vision = data["vision"]
+    width, height = int(vision["width"]), int(vision["height"])
+    if (width, height) != (640, 480):
+        raise ValueError("vision dimensions must match the calibrated 640x480 wrist stream")
+    encodings = vision.get("encodings")
+    if not isinstance(encodings, list) or not encodings or any(
+        encoding not in {"rgb8", "bgr8"} for encoding in encodings
+    ):
+        raise ValueError("vision.encodings must contain only rgb8 and/or bgr8")
+    target = np.asarray(vision["target_right_rim_px"], dtype=float)
+    if target.shape != (2,) or not np.all(np.isfinite(target)) or not (0 <= target[0] < width and 0 <= target[1] < height):
+        raise ValueError("vision.target_right_rim_px must lie inside the wrist image")
+    jacobian = np.asarray(vision["shanghai_base_xy_to_image_uv"], dtype=float)
+    if jacobian.shape != (2, 2) or not np.all(np.isfinite(jacobian)) or abs(float(np.linalg.det(jacobian))) < 1.0e-6:
+        raise ValueError("vision.shanghai_base_xy_to_image_uv must be a finite invertible 2x2 matrix")
+    if int(vision["maximum_iterations"]) <= 0:
+        raise ValueError("vision.maximum_iterations must be positive")
+    for field in ("maximum_stable_spread_px", "alignment_tolerance_px"):
+        if not math.isfinite(float(vision[field])) or float(vision[field]) <= 0.0:
+            raise ValueError(f"vision.{field} must be positive and finite")
+    gripper = data["gripper"]
+    for field in ("command_duration_s", "settle_timeout_s", "settled_spread",
+                  "minimum_contact_delta_from_empty_closed"):
+        if not math.isfinite(float(gripper[field])) or float(gripper[field]) <= 0.0:
+            raise ValueError(f"gripper.{field} must be positive and finite")
+    if not math.isfinite(float(gripper["open"])) or not math.isfinite(float(gripper["closed"])):
+        raise ValueError("gripper open/closed values must be finite")
+    if not 0.0 <= float(gripper["closed"]) < float(gripper["open"]) <= 1.0:
+        raise ValueError("gripper values must satisfy 0 <= closed < open <= 1")
+    spine_target = float(data["spine"]["initial_target_m"])
+    if not math.isfinite(spine_target) or not 0.0 <= spine_target <= 0.8:
+        raise ValueError("spine.initial_target_m must be within the official 0.0-0.8 m range")
+    if data["arm_command_interface"].get("message_type") != "sensor_msgs/msg/JointState":
+        raise ValueError("arm command interface must be sensor_msgs/msg/JointState")
+    if set(data["objects"]) != set(OBJECTS):
+        raise ValueError("objects must contain exactly cup, bowl, and plate")
     for object_name in OBJECTS:
         descent = float(data["objects"][object_name]["descent_m"])
-        if not 0.05 <= descent <= 0.40:
+        destination = data["objects"][object_name]["destination"]
+        if not math.isfinite(descent) or not 0.05 <= descent <= 0.40:
             raise ValueError(f"{object_name} descent is outside the 0.05-0.40 m trial bound")
+        if not isinstance(destination, str) or len(destination) != 1 or not destination.isupper():
+            raise ValueError(f"{object_name} destination must be one uppercase letter")
     return data
+
+
+def validate_cycle_venue_consistency(config: dict[str, Any], venue: dict[str, Any]) -> None:
+    """Reject duplicated interface values that drifted apart before motion."""
+    streams = {item["name"]: item["topic"] for item in venue["streams"]}
+    commands = {item["name"]: item["topic"] for item in venue["command_endpoints"]}
+    expected = {
+        "left_joint_state": streams["left_arm_joint_state"],
+        "right_joint_state": streams["right_arm_joint_state"],
+        "left_gripper_state": streams["left_gripper_joint_state"],
+        "left_wrist_image": streams["left_wrist_camera"],
+        "left_joint_target": commands["left_arm_joint_target"],
+        "right_joint_target": commands["right_arm_joint_target"],
+        "left_gripper_target": commands["left_gripper_target"],
+    }
+    mismatches = [
+        f"topics.{name}={config['topics'].get(name)!r}, venue={topic!r}"
+        for name, topic in expected.items() if config["topics"].get(name) != topic
+    ]
+    profile_gripper = venue["interface_profile"]["gripper"]
+    if profile_gripper["message_type"] != "std_msgs/msg/Float32" or profile_gripper["field"] != "data":
+        mismatches.append(
+            "native grasp execution currently requires std_msgs/msg/Float32 field data for the gripper"
+        )
+    if venue["interface_profile"]["spine"]["interface"] != "action":
+        mismatches.append("native Hamburg execution requires the organizer-confirmed spine action interface")
+    expected_types = {
+        "left_arm_joint_state": "sensor_msgs/msg/JointState",
+        "right_arm_joint_state": "sensor_msgs/msg/JointState",
+        "left_gripper_joint_state": "sensor_msgs/msg/JointState",
+        "left_wrist_camera": "sensor_msgs/msg/Image",
+    }
+    stream_entries = {item["name"]: item for item in venue["streams"]}
+    command_entries = {item["name"]: item for item in venue["command_endpoints"]}
+    for name, expected_type in expected_types.items():
+        if expected_type not in stream_entries[name]["accepted_types"]:
+            mismatches.append(f"{name} must provide {expected_type}")
+    for name in ("left_arm_joint_target", "right_arm_joint_target"):
+        if "sensor_msgs/msg/JointState" not in command_entries[name]["accepted_types"]:
+            mismatches.append(f"{name} must accept sensor_msgs/msg/JointState")
+    for field in ("open", "closed"):
+        if not math.isclose(float(config["gripper"][field]), float(profile_gripper[field]), abs_tol=1.0e-9):
+            mismatches.append(
+                f"gripper.{field}={config['gripper'][field]!r}, interface_profile={profile_gripper[field]!r}"
+            )
+    if mismatches:
+        raise ValueError("grasp/venue interface mismatch: " + "; ".join(mismatches))
+
+
+def resolve_cycle_venue_overrides(config: dict[str, Any], venue: dict[str, Any]) -> dict[str, Any]:
+    """Apply only explicitly requested venue-profile overrides to execution."""
+    resolved = deepcopy(config)
+    profile = venue["interface_profile"]
+    applied = profile.get("applied_environment_overrides", {})
+    changes: dict[str, Any] = {}
+    mappings = {
+        "TMR_HAMBURG_LEFT_GRIPPER_TOPIC": (
+            ("topics", "left_gripper_target"), profile["gripper"]["left_topic"]
+        ),
+        "TMR_HAMBURG_GRIPPER_OPEN": (("gripper", "open"), profile["gripper"]["open"]),
+        "TMR_HAMBURG_GRIPPER_CLOSED": (("gripper", "closed"), profile["gripper"]["closed"]),
+        "TMR_HAMBURG_SPINE_HOME_M": (("spine", "initial_target_m"), profile["spine"]["home_m"]),
+    }
+    for environment_name, (path, value) in mappings.items():
+        if environment_name not in applied:
+            continue
+        resolved[path[0]][path[1]] = value
+        changes[".".join(path)] = value
+    if changes:
+        resolved["applied_venue_overrides"] = changes
+    validate_cycle_venue_consistency(resolved, venue)
+    return resolved
 
 
 def alignment_delta_m(point_px: tuple[float, float], config: dict[str, Any]) -> tuple[float, float]:
@@ -178,7 +327,56 @@ class NativeArmGraspCycle:
             missing.append("left wrist image")
         if missing:
             raise RuntimeError("missing live inputs: " + ", ".join(missing))
+        try:
+            decode_wrist_rgb(self.images[-1][1])
+        except Exception as exc:
+            raise RuntimeError(
+                f"left wrist image is unusable before motion: {type(exc).__name__}: {exc}"
+            ) from exc
         self.commanded = {arm: list(self.states[arm] or []) for arm in ("left", "right")}
+
+    def diagnostic_snapshot(self) -> dict[str, Any]:
+        """Return bounded live-state context suitable for a failure report."""
+        now = time.monotonic()
+        return {
+            "joint_feedback_age_s": {
+                arm: (round(now - stamp, 3) if stamp > 0.0 else None)
+                for arm, stamp in self.state_times.items()
+            },
+            "measured_joints": self.states,
+            "commanded_joints": self.commanded,
+            "gripper_sample_count": len(self.gripper_samples),
+            "latest_gripper_feedback": (
+                self.gripper_samples[-1][1] if self.gripper_samples else None
+            ),
+            "latest_gripper_feedback_age_s": (
+                round(now - self.gripper_samples[-1][0], 3)
+                if self.gripper_samples else None
+            ),
+            "buffered_wrist_frames": len(self.images),
+        }
+
+    def set_phase(self, report: dict[str, Any], phase: str) -> None:
+        report["active_phase"] = phase
+        print(json.dumps({
+            "event": "phase",
+            "operation": "grasp-test",
+            "object": report.get("object"),
+            "phase": phase,
+        }), file=sys.stderr, flush=True)
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / f"{report.get('object', 'grasp')}-progress.json"
+            temporary = path.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            temporary.replace(path)
+        except Exception as exc:
+            warning = f"progress_persist: {type(exc).__name__}: {exc}"
+            if warning not in report.setdefault("report_warnings", []):
+                report["report_warnings"].append(warning)
+            print(warning, file=sys.stderr, flush=True)
 
     def assert_controller_graph(self) -> dict[str, int]:
         topics = self.config["topics"]
@@ -214,11 +412,16 @@ class NativeArmGraspCycle:
         commanded = self.commanded[arm]
         if measured is None or commanded is None:
             raise RuntimeError(f"{arm} joint feedback disappeared")
-        if time.monotonic() - self.state_times[arm] > 0.5:
-            raise RuntimeError(f"{arm} joint feedback became stale")
+        age = time.monotonic() - self.state_times[arm]
+        if age > 0.5:
+            raise RuntimeError(f"{arm} joint feedback became stale (age={age:.3f}s)")
         error = max(abs(a - b) for a, b in zip(measured, commanded))
         if error > float(self.config["motion"]["maximum_following_error_rad"]):
             raise RuntimeError(f"{arm} following error {error:.4f} rad exceeds limit")
+
+    def _check_all_following(self) -> None:
+        for arm in ("left", "right"):
+            self._check_following(arm)
 
     def move_arm_targets(self, arm: str, targets: list[list[float]]) -> None:
         rate = float(self.config["motion"]["publish_rate_hz"])
@@ -232,7 +435,7 @@ class NativeArmGraspCycle:
             for point in smooth_joint_targets(start, target, rate, velocity):
                 self.commanded[arm] = point
                 self.spin_for(1.0 / rate)
-                self._check_following(arm)
+                self._check_all_following()
         tolerance = float(self.config["motion"]["endpoint_tolerance_rad"])
         timeout = float(self.config["motion"]["endpoint_timeout_s"])
         deadline = time.monotonic() + timeout
@@ -255,7 +458,7 @@ class NativeArmGraspCycle:
         for point in targets:
             self.commanded[arm] = point
             self.spin_for(1.0 / rate)
-            self._check_following(arm)
+            self._check_all_following()
         self.move_arm_targets(arm, [list(target)])
 
     def command_gripper(self, value: float) -> list[float]:
@@ -279,22 +482,32 @@ class NativeArmGraspCycle:
                 array = np.asarray(recent, dtype=float)
                 if float(np.max(np.ptp(array, axis=0))) <= spread_limit:
                     return np.median(array, axis=0).tolist()
-        raise RuntimeError("left gripper feedback did not settle")
+        now = time.monotonic()
+        recent_count = sum(1 for stamp, _values in self.gripper_samples if now - stamp <= 0.5)
+        latest_age = now - self.gripper_samples[-1][0] if self.gripper_samples else math.inf
+        raise RuntimeError(
+            "left gripper feedback did not settle "
+            f"(recent_samples={recent_count}, latest_age_s={latest_age:.3f})"
+        )
 
     def stable_detection(self, object_name: str, timeout_s: float = 8.0) -> tuple[tuple[float, float], Any]:
         points: deque[tuple[float, float] | None] = deque(maxlen=7)
         last_stamp = self.images[-1][0] if self.images else 0
         last_bgr = None
+        fresh_frames = 0
+        detection_errors: deque[str] = deque(maxlen=3)
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             self.spin_for(0.05)
             fresh = [(stamp, image) for stamp, image in self.images if stamp > last_stamp]
             for stamp, image in fresh:
                 last_stamp = stamp
+                fresh_frames += 1
                 try:
                     last_bgr = decode_wrist_rgb(image)
                     points.append(detect_object(object_name, last_bgr))
-                except Exception:
+                except Exception as exc:
+                    detection_errors.append(f"{type(exc).__name__}: {exc}")
                     points.append(None)
                 valid = [point for point in points if point is not None]
                 if len(valid) >= 5 and len(points) >= 5 and all(point is not None for point in list(points)[-2:]):
@@ -304,7 +517,12 @@ class NativeArmGraspCycle:
                     if spread <= float(self.config["vision"]["maximum_stable_spread_px"]):
                         return (float(median[0]), float(median[1])), last_bgr
             self.images = deque([(stamp, image) for stamp, image in self.images if stamp >= last_stamp], maxlen=20)
-        raise RuntimeError(f"no stable fresh {object_name} rim detection")
+        valid = sum(point is not None for point in points)
+        detail = "; ".join(detection_errors) if detection_errors else "detector returned no rim"
+        raise RuntimeError(
+            f"no stable fresh {object_name} rim detection "
+            f"(fresh_frames={fresh_frames}, recent_valid={valid}/{len(points)}, detail={detail})"
+        )
 
     def visual_align(self, object_name: str, mount_rotation: np.ndarray,
                      records: list[dict[str, Any]]) -> tuple[list[float], Any]:
@@ -346,24 +564,25 @@ class NativeArmGraspCycle:
             "single_ros_node_during_motion": True,
             "parameter_profile": self.config["profile_name"],
             "parameter_scope": self.config["parameter_scope"],
+            "applied_venue_overrides": self.config.get("applied_venue_overrides", {}),
             "selected_descent_m": descent_m,
             "phases_completed": [],
             "visual_alignment": [],
         }
         self.last_report = report
-        report["active_phase"] = "wait_for_live_interfaces"
+        self.set_phase(report, "wait_for_live_interfaces")
         self.wait_live(10.0)
         report["controller_subscriber_counts"] = self.assert_controller_graph()
-        report["active_phase"] = "spine_to_pickup_height"
+        self.set_phase(report, "spine_to_pickup_height")
+        report["motion_commanded"] = True
         report["spine"] = spine.move_absolute(float(self.config["spine"]["initial_target_m"]))
         report["phases_completed"].append("spine_ready")
-        report["motion_commanded"] = True
-        report["active_phase"] = "arms_to_pickup_posture"
+        self.set_phase(report, "arms_to_pickup_posture")
         self.move_to_joint_posture("right", self.config["posture"]["right_parking_rad"])
         self.move_to_joint_posture("left", self.config["posture"]["left_pick_top_rad"])
         report["phases_completed"].append("arms_at_shanghai_reference_pickup_view")
 
-        report["active_phase"] = "empty_close_baseline"
+        self.set_phase(report, "empty_close_baseline")
         empty = self.command_gripper(float(self.config["gripper"]["closed"]))
         self.command_gripper(float(self.config["gripper"]["open"]))
         report["empty_closed_baseline"] = empty
@@ -373,12 +592,17 @@ class NativeArmGraspCycle:
             self.config["posture"]["left_pick_top_rad"],
             self.config["posture"]["left_tool_quaternion_xyzw"],
         )
-        report["active_phase"] = "wrist_observation_and_alignment"
+        self.set_phase(report, "wrist_observation_and_alignment")
         aligned_q, bgr = self.visual_align(object_name, mount, report["visual_alignment"])
         image_path = self.output_dir / f"{object_name}-aligned-wrist.png"
         final_point = tuple(report["visual_alignment"][-1]["rim_point_px"])
-        save_observation_image(bgr, object_name, final_point, image_path)
-        report["aligned_wrist_image"] = str(image_path)
+        try:
+            save_observation_image(bgr, object_name, final_point, image_path)
+            report["aligned_wrist_image"] = str(image_path)
+        except Exception as image_exc:
+            warning = f"aligned_image_write: {type(image_exc).__name__}: {image_exc}"
+            report.setdefault("report_warnings", []).append(warning)
+            print(warning, file=sys.stderr, flush=True)
         report["phases_completed"].append("observation_and_visual_alignment_complete")
 
         descent_path = cartesian_waypoints(
@@ -390,11 +614,11 @@ class NativeArmGraspCycle:
         object_closed: list[float] | None = None
         retained: list[float] | None = None
         try:
-            report["active_phase"] = "descent"
+            self.set_phase(report, "descent")
             descent_started = True
             self.move_arm_targets("left", descent_path)
             report["phases_completed"].append("descent_complete")
-            report["active_phase"] = "close_and_lift"
+            self.set_phase(report, "close_and_lift")
             object_closed = self.command_gripper(float(self.config["gripper"]["closed"]))
             self.move_arm_targets("left", list(reversed([aligned_q] + descent_path[:-1])))
             lifted = True
@@ -405,19 +629,60 @@ class NativeArmGraspCycle:
                 float(self.config["gripper"]["minimum_contact_delta_from_empty_closed"]),
             )
         finally:
-            # A trial always leaves the utensil at the pickup point and the arm above it.
-            if descent_started and not lifted:
-                # Return through the known pickup-top joint target even if a
-                # following-error exception interrupted the downward stream.
-                self.move_to_joint_posture("left", aligned_q)
-            elif object_closed is not None:
-                report["active_phase"] = "return_release_and_retract"
-                self.move_arm_targets("left", descent_path)
-                self.command_gripper(float(self.config["gripper"]["open"]))
-                self.move_arm_targets("left", list(reversed([aligned_q] + descent_path[:-1])))
+            primary = sys.exc_info()[1]
+            if primary is not None:
+                report.setdefault("failed_phase", report.get("active_phase", "unknown"))
+            object_may_be_held = (
+                object_closed is not None or report.get("failed_phase") == "close_and_lift"
+            )
+            if isinstance(primary, KeyboardInterrupt):
+                report["recovery"] = {
+                    "status": "skipped_after_operator_interrupt",
+                    "object_may_be_held": object_may_be_held,
+                }
+            else:
+                try:
+                    if descent_started and not lifted:
+                        self.set_phase(report, "recover_to_pickup_top")
+                        self.move_to_joint_posture("left", aligned_q)
+                        if object_closed is not None:
+                            self.set_phase(report, "recover_release_and_retract")
+                            self.move_arm_targets("left", descent_path)
+                            self.command_gripper(float(self.config["gripper"]["open"]))
+                            self.move_arm_targets(
+                                "left", list(reversed([aligned_q] + descent_path[:-1]))
+                            )
+                            report["recovery"] = {
+                                "status": "released_and_returned_to_pickup_top",
+                                "object_may_be_held": False,
+                            }
+                        else:
+                            report["recovery"] = {
+                                "status": "returned_to_pickup_top",
+                                "object_may_be_held": object_may_be_held,
+                            }
+                    elif object_closed is not None:
+                        self.set_phase(report, "return_release_and_retract")
+                        self.move_arm_targets("left", descent_path)
+                        self.command_gripper(float(self.config["gripper"]["open"]))
+                        self.move_arm_targets("left", list(reversed([aligned_q] + descent_path[:-1])))
+                        report["recovery"] = {
+                            "status": "released_and_returned_to_pickup_top",
+                            "object_may_be_held": False,
+                        }
+                except Exception as recovery_exc:
+                    report.setdefault("recovery_errors", []).append(
+                        f"{type(recovery_exc).__name__}: {recovery_exc}"
+                    )
+                    report["recovery"] = {
+                        "status": "failed",
+                        "object_may_be_held": object_may_be_held,
+                    }
+                    if primary is None:
+                        raise
         report["phases_completed"].append("released_and_returned_to_pickup_top")
         report["status"] = "passed" if report["grasp_evidence"]["accepted_as_held"] else "failed_contact_check"
-        report["active_phase"] = "complete"
+        self.set_phase(report, "complete")
         report["duration_s"] = round(time.monotonic() - started, 3)
         self.spin_for(1.0)
         return report
@@ -449,47 +714,102 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    config = load_cycle_config(args.config)
-    descent = float(args.descent_m if args.descent_m is not None else config["objects"][args.object]["descent_m"])
-    if not 0.05 <= descent <= 0.40:
-        raise SystemExit("--descent-m must be between 0.05 and 0.40")
+    report_path = args.output or args.output_dir / f"{args.object}-grasp-report.json"
+    try:
+        config = load_cycle_config(args.config)
+        descent = float(
+            args.descent_m
+            if args.descent_m is not None
+            else config["objects"][args.object]["descent_m"]
+        )
+        if not math.isfinite(descent) or not 0.05 <= descent <= 0.40:
+            raise ValueError("--descent-m must be between 0.05 and 0.40")
+    except Exception as exc:
+        write_report({
+            "status": "invalid_configuration",
+            "motion_commanded": False,
+            "failed_phase": "load_and_validate_configuration",
+            "errors": [f"{type(exc).__name__}: {exc}"],
+            "traceback": traceback.format_exc(),
+        }, report_path)
+        return 2
     if not args.execute:
         write_report(plan_report(config, args.object, args.descent_m), args.output)
         return 0
 
-    venue = load_config(args.venue_config)
-    environment, errors = environment_report(venue)
+    try:
+        venue = load_config(args.venue_config)
+        config = resolve_cycle_venue_overrides(config, venue)
+        environment, errors = environment_report(venue)
+    except Exception as exc:
+        write_report({
+            "status": "invalid_environment",
+            "motion_commanded": False,
+            "failed_phase": "load_and_validate_venue",
+            "errors": [f"{type(exc).__name__}: {exc}"],
+            "traceback": traceback.format_exc(),
+        }, report_path)
+        return 2
     if errors:
         report = {"status": "blocked", "motion_commanded": False,
                   "environment": environment, "errors": errors}
-        write_report(report, args.output)
+        write_report(report, report_path)
         return 2
 
-    import rclpy
-    from rclpy.node import Node
-
-    rclpy.init(args=None)
-    node = Node("tmr_task3_hamburg_autonomous_grasp")
+    rclpy = None
+    node = None
+    rclpy_started = False
     spine: SpineControl | None = None
     runner: NativeArmGraspCycle | None = None
+    report: dict[str, Any] = {
+        "status": "starting", "motion_commanded": False, "object": args.object
+    }
     try:
+        import rclpy as rclpy_module
+        from rclpy.node import Node
+
+        rclpy = rclpy_module
+        rclpy.init(args=None)
+        rclpy_started = True
+        node = Node("tmr_task3_hamburg_autonomous_grasp")
         runner = NativeArmGraspCycle(node, venue, config, args.output_dir)
         spine = SpineControl(node, venue["interface_profile"]["spine"])
         report = runner.run(args.object, descent, spine)
     except KeyboardInterrupt:
         report = dict(runner.last_report) if runner is not None else {}
-        report.update({"status": "interrupted", "motion_commanded": True,
+        report.setdefault("failed_phase", report.get("active_phase", "startup"))
+        report.update({"status": "interrupted",
+                       "motion_commanded": bool(report.get("motion_commanded", False)),
                        "errors": ["operator interrupted the physical trial"]})
     except Exception as exc:
         report = dict(runner.last_report) if runner is not None else {}
-        report.update({"status": "failed", "motion_commanded": True,
-                       "errors": [f"{type(exc).__name__}: {exc}"]})
+        report.setdefault("failed_phase", report.get("active_phase", "startup"))
+        report.update({"status": "failed",
+                       "motion_commanded": bool(report.get("motion_commanded", False)),
+                       "errors": [f"{type(exc).__name__}: {exc}"],
+                       "traceback": traceback.format_exc()})
     finally:
+        cleanup_errors = []
+        for label, operation in (
+            ("spine_close", spine.close if spine is not None else None),
+            ("node_destroy", node.destroy_node if node is not None else None),
+            ("rclpy_shutdown", rclpy.shutdown if rclpy is not None and rclpy_started else None),
+        ):
+            if operation is None:
+                continue
+            try:
+                operation()
+            except Exception as cleanup_exc:
+                cleanup_errors.append(f"{label}: {type(cleanup_exc).__name__}: {cleanup_exc}")
+        if cleanup_errors:
+            report.setdefault("cleanup_errors", []).extend(cleanup_errors)
+            if report.get("status") == "passed":
+                report["status"] = "failed_cleanup"
+        if runner is not None:
+            report["final_diagnostics"] = runner.diagnostic_snapshot()
         if spine is not None:
-            spine.close()
-        node.destroy_node()
-        rclpy.shutdown()
-    write_report(report, args.output)
+            report["spine_diagnostics"] = spine.diagnostic_snapshot()
+    write_report(report, report_path)
     return 0 if report.get("status") == "passed" else 2
 
 

@@ -89,6 +89,9 @@ clearly identified Shanghai references.
 ## Run order
 
 Use the organizer's already sourced domain 0 / Fast DDS UDP-only environment.
+That sourced Humble workspace must expose the organizer's
+`franka_spine_msgs/action/MoveAbsolute` and `franka_spine_msgs/srv/GetPosition`
+types; the native preflight checks this before any motion.
 First run the native check without the temporary odometry or spine relays:
 
 ```bash
@@ -122,6 +125,9 @@ the utensil to its pickup position, opens the gripper, and finishes above it:
 The pass condition requires a stable rim detection, visual alignment, completed
 descent/lift, and gripper feedback that differs from the empty-close baseline
 both before and after lift. A close command alone is not reported as a grasp.
+Each phase is also printed to the terminal and saved in a progress JSON under
+`--output-dir`; the final report includes primary, recovery, cleanup, and live
+state diagnostics when available.
 
 Inspect the full plan, then run it with the chosen files:
 

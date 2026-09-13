@@ -10,17 +10,24 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from copy import deepcopy
 import json
 import math
 import os
 from pathlib import Path
 import sys
 import time
+import traceback
 from typing import Any
 
 import numpy as np
 
-from hamburg_grasp_cycle import NativeArmGraspCycle, load_cycle_config, write_report
+from hamburg_grasp_cycle import (
+    NativeArmGraspCycle,
+    load_cycle_config,
+    resolve_cycle_venue_overrides,
+    write_report,
+)
 from hamburg_motion_core import cartesian_waypoints, derive_mount_rotation, gripper_contact_report
 from hamburg_preflight import environment_report, load_config
 from spine_control import SpineControl
@@ -72,7 +79,8 @@ def decode_raw_bgr(message: Any, width: int, height: int, encodings: list[str]):
 
 def validate_mission_config(config: dict[str, Any]) -> None:
     required = {
-        "topics", "head_camera", "hamburg_measurements", "base_motion",
+        "profile_name", "profile_warning", "topics", "head_camera",
+        "hamburg_measurements", "base_motion",
         "outbound_shanghai_reference", "post_pick_shanghai_reference",
         "letter_search_shanghai_reference", "placement_shanghai_reference",
         "return_to_pickup_shanghai_reference", "assignment",
@@ -80,14 +88,184 @@ def validate_mission_config(config: dict[str, Any]) -> None:
     missing = sorted(required - config.keys())
     if missing:
         raise ValueError("mission config is missing: " + ", ".join(missing))
+    required_topics = {"odometry", "base_command", "front_lidar", "rear_lidar", "head_image"}
+    missing_topics = sorted(required_topics - config["topics"].keys())
+    if missing_topics:
+        raise ValueError("mission topics are missing: " + ", ".join(missing_topics))
+    for name, topic in config["topics"].items():
+        if not isinstance(topic, str) or not topic.startswith("/"):
+            raise ValueError(f"topics.{name} must be an absolute ROS topic")
     if set(config["assignment"]) != set(OBJECTS):
         raise ValueError("assignment must contain cup, bowl, and plate")
     if len(set(config["assignment"].values())) != 3:
         raise ValueError("object destination letters must be distinct")
+    search = config["letter_search_shanghai_reference"]
+    alphabet = str(search["alphabet"])
+    if not alphabet or len(set(alphabet)) != len(alphabet) or not alphabet.isupper():
+        raise ValueError("letter-search alphabet must contain unique uppercase letters")
+    for object_name, destination in config["assignment"].items():
+        if not isinstance(destination, str) or len(destination) != 1 or destination not in alphabet:
+            raise ValueError(f"assignment.{object_name} must be one letter from the search alphabet")
+
+    def finite(section: dict[str, Any], field: str, *, low: float | None = None,
+               high: float | None = None) -> float:
+        value = section[field]
+        if isinstance(value, bool):
+            raise ValueError(f"{field} must be numeric")
+        number = float(value)
+        if not math.isfinite(number) or (low is not None and number < low) or (
+            high is not None and number > high
+        ):
+            bounds = f" in [{low}, {high}]" if low is not None or high is not None else ""
+            raise ValueError(f"{field} must be finite{bounds}")
+        return number
+
+    camera = config["head_camera"]
+    if int(camera["width"]) <= 0 or int(camera["height"]) <= 0 or not camera["encodings"]:
+        raise ValueError("head_camera requires positive dimensions and accepted encodings")
+    if not isinstance(camera["encodings"], list) or any(
+        encoding not in {"rgb8", "bgr8"} for encoding in camera["encodings"]
+    ):
+        raise ValueError("head_camera.encodings must contain only rgb8 and/or bgr8")
+    motion = config["base_motion"]
+    for field in (
+        "linear_speed_mps", "angular_speed_rps", "position_tolerance_m",
+        "yaw_tolerance_deg", "no_progress_timeout_s", "feedback_stale_s",
+        "minimum_lidar_range_m",
+    ):
+        finite(motion, field, low=1.0e-6)
+
     for group in ("outbound_shanghai_reference", "post_pick_shanghai_reference"):
+        if not config[group]:
+            raise ValueError(f"{group} must not be empty")
+        names = set()
         for stage in config[group]:
+            name = str(stage.get("name", "")).strip()
+            if not name or name in names:
+                raise ValueError(f"{group} contains a missing or duplicate stage name")
+            names.add(name)
             if stage["kind"] not in {"translate", "rotate", "front_clearance"}:
                 raise ValueError(f"unsupported route stage {stage['kind']!r}")
+            if stage["kind"] == "translate":
+                forward = finite(stage, "forward_m", low=-5.0, high=5.0)
+                left = finite(stage, "left_m", low=-5.0, high=5.0)
+                if math.hypot(forward, left) < 1.0e-6:
+                    raise ValueError(f"route stage {name!r} has no translation")
+            elif stage["kind"] == "rotate":
+                angle = finite(stage, "ccw_deg", low=-360.0, high=360.0)
+                if abs(angle) < 1.0e-6:
+                    raise ValueError(f"route stage {name!r} has no rotation")
+            else:
+                finite(stage, "maximum_forward_m", low=1.0e-6, high=5.0)
+                clearance = finite(stage, "front_clearance_m", low=1.0e-6, high=2.0)
+                if clearance <= float(motion["minimum_lidar_range_m"]):
+                    raise ValueError(f"route stage {name!r} clearance must exceed the LiDAR hard-stop range")
+
+    maximum_right = finite(search, "maximum_right_m", low=1.0e-6, high=5.0)
+    minimum_detection = finite(search, "minimum_detection_right_m", low=0.0, high=maximum_right)
+    if minimum_detection >= maximum_right:
+        raise ValueError("minimum_detection_right_m must be below maximum_right_m")
+    for field in ("search_speed_mps", "refine_speed_mps"):
+        finite(search, field, low=1.0e-6, high=float(motion["linear_speed_mps"]))
+    finite(search, "center_tolerance_normalized", low=1.0e-6, high=0.5)
+    finite(search, "minimum_confidence", low=0.0, high=1.0)
+    finite(search, "row_split_y_normalized", low=0.0, high=1.0)
+    finite(search, "post_center_right_m", low=0.0, high=maximum_right)
+    if int(search["stable_frames"]) < 2:
+        raise ValueError("stable_frames must be at least two")
+
+    placement = config["placement_shanghai_reference"]
+    near = finite(placement, "near_forward_m", low=0.0, high=0.40)
+    far = finite(placement, "far_forward_m", low=0.0, high=0.40)
+    if far < near:
+        raise ValueError("far placement distance must not be smaller than near")
+
+    returning = config["return_to_pickup_shanghai_reference"]
+    finite(returning, "extra_left_after_measured_search_m", low=-1.0, high=1.0)
+    finite(returning, "clockwise_turn_deg", low=-360.0, high=360.0)
+    finite(returning, "to_before_door_m", low=-5.0, high=5.0)
+    finite(returning, "through_door_m", low=-5.0, high=5.0)
+    finite(returning, "approach_pickup_maximum_m", low=1.0e-6, high=5.0)
+    return_clearance = finite(returning, "pickup_front_clearance_m", low=1.0e-6, high=2.0)
+    if return_clearance <= float(motion["minimum_lidar_range_m"]):
+        raise ValueError("return pickup clearance must exceed the LiDAR hard-stop range")
+
+    for name, value in config["hamburg_measurements"].items():
+        if name == "source" or value is None:
+            continue
+        if not math.isfinite(float(value)) or float(value) <= 0.0:
+            raise ValueError(f"hamburg_measurements.{name} must be positive or null")
+
+
+def validate_mission_venue_consistency(config: dict[str, Any], venue: dict[str, Any]) -> None:
+    streams = {item["name"]: item for item in venue["streams"]}
+    commands = {item["name"]: item for item in venue["command_endpoints"]}
+    expected_topics = {
+        "odometry": streams["mobile_base_odometry"]["topic"],
+        "base_command": commands["mobile_base_velocity"]["topic"],
+        "front_lidar": streams["front_lidar"]["topic"],
+        "rear_lidar": streams["rear_lidar"]["topic"],
+        "head_image": streams["head_camera"]["topic"],
+    }
+    mismatches = [
+        f"topics.{name}={config['topics'].get(name)!r}, venue={topic!r}"
+        for name, topic in expected_topics.items() if config["topics"].get(name) != topic
+    ]
+    head = streams["head_camera"]
+    actual_dimensions = (int(config["head_camera"]["width"]), int(config["head_camera"]["height"]))
+    venue_dimensions = (int(head["expected_width"]), int(head["expected_height"]))
+    if actual_dimensions != venue_dimensions:
+        mismatches.append(f"head_camera dimensions={actual_dimensions}, venue={venue_dimensions}")
+    expected_encoding = head.get("expected_encoding")
+    if expected_encoding and expected_encoding not in config["head_camera"]["encodings"]:
+        mismatches.append(
+            f"head_camera encodings={config['head_camera']['encodings']!r}, "
+            f"venue expected={expected_encoding!r}"
+        )
+    expected_stream_types = {
+        "mobile_base_odometry": "nav_msgs/msg/Odometry",
+        "front_lidar": "sensor_msgs/msg/LaserScan",
+        "rear_lidar": "sensor_msgs/msg/LaserScan",
+        "head_camera": "sensor_msgs/msg/Image",
+    }
+    for name, expected_type in expected_stream_types.items():
+        if expected_type not in streams[name]["accepted_types"]:
+            mismatches.append(f"{name} must provide {expected_type}")
+    if "geometry_msgs/msg/TwistStamped" not in commands["mobile_base_velocity"]["accepted_types"]:
+        mismatches.append("mobile_base_velocity must accept geometry_msgs/msg/TwistStamped")
+    if mismatches:
+        raise ValueError("mission/venue interface mismatch: " + "; ".join(mismatches))
+
+
+def resolve_mission_venue_overrides(config: dict[str, Any], venue: dict[str, Any]) -> dict[str, Any]:
+    resolved = deepcopy(config)
+    profile = venue["interface_profile"]
+    applied = profile.get("applied_environment_overrides", {})
+    changes: dict[str, Any] = {}
+    for environment_name, field in (
+        ("TMR_HAMBURG_HEAD_CAMERA_WIDTH", "width"),
+        ("TMR_HAMBURG_HEAD_CAMERA_HEIGHT", "height"),
+    ):
+        if environment_name in applied:
+            value = int(profile["head_camera"][field])
+            resolved["head_camera"][field] = value
+            changes[f"head_camera.{field}"] = value
+    if changes:
+        resolved["applied_venue_overrides"] = changes
+    validate_mission_config(resolved)
+    validate_mission_venue_consistency(resolved, venue)
+    return resolved
+
+
+def validate_combined_configs(mission: dict[str, Any], grasp: dict[str, Any]) -> None:
+    grasp_assignment = {
+        object_name: grasp["objects"][object_name]["destination"] for object_name in OBJECTS
+    }
+    if mission["assignment"] != grasp_assignment:
+        raise ValueError(
+            f"mission/grasp object assignments differ: mission={mission['assignment']!r}, "
+            f"grasp={grasp_assignment!r}"
+        )
 
 
 def plan_report(mission: dict[str, Any], grasp: dict[str, Any]) -> dict[str, Any]:
@@ -140,6 +318,7 @@ class NativeBaseControl:
         self.head_frames: deque[tuple[int, Any]] = deque(maxlen=12)
         self.head_at = 0.0
         self.active_stage: str | None = None
+        self.stage_history: deque[dict[str, Any]] = deque(maxlen=30)
         topics = config["topics"]
 
         def on_odom(message: Any) -> None:
@@ -182,6 +361,21 @@ class NativeBaseControl:
             self.publish(0.0, 0.0, 0.0)
             self.arm.spin_for(0.025)
 
+    def stop_preserving_primary_error(self, context: str) -> None:
+        """Latch zero without replacing the operation failure already in flight."""
+        primary = sys.exc_info()[1]
+        try:
+            self.stop()
+        except BaseException as stop_exc:
+            self.stage_history.append({
+                "stage": self.active_stage,
+                "status": "stop_failed",
+                "context": context,
+                "error": f"{type(stop_exc).__name__}: {stop_exc}",
+            })
+            if primary is None:
+                raise
+
     def wait_ready(self, timeout_s: float = 12.0) -> None:
         external = [
             info for info in self.node.get_publishers_info_by_topic(self.config["topics"]["base_command"])
@@ -196,9 +390,36 @@ class NativeBaseControl:
             if self.pose is not None and set(self.scans) == {"front", "rear"} and len(self.head_frames) >= 2:
                 if self.publisher.get_subscription_count() >= 1:
                     self.assert_fresh()
+                    try:
+                        decode_raw_bgr(
+                            self.head_frames[-1][1],
+                            int(self.config["head_camera"]["width"]),
+                            int(self.config["head_camera"]["height"]),
+                            self.config["head_camera"]["encodings"],
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"head image is unusable before motion: {type(exc).__name__}: {exc}"
+                        ) from exc
                     self.stop(0.2)
                     return
         raise RuntimeError("native odometry, dual LiDAR, head image, or base controller is unavailable")
+
+    def diagnostic_snapshot(self) -> dict[str, Any]:
+        """Return bounded base/sensor context for the final report."""
+        now = time.monotonic()
+        return {
+            "active_stage": self.active_stage,
+            "last_command": list(self.command),
+            "pose": list(self.pose) if self.pose is not None else None,
+            "odometry_age_s": round(now - self.pose_at, 3) if self.pose_at > 0.0 else None,
+            "lidar_age_s": {
+                name: round(now - value[0], 3) for name, value in self.scans.items()
+            },
+            "head_frame_age_s": round(now - self.head_at, 3) if self.head_at > 0.0 else None,
+            "buffered_head_frames": len(self.head_frames),
+            "stage_history": list(self.stage_history),
+        }
 
     def assert_fresh(self) -> None:
         stale = float(self.config["base_motion"]["feedback_stale_s"])
@@ -294,7 +515,7 @@ class NativeBaseControl:
             else:
                 raise TimeoutError("base translation timed out")
         finally:
-            self.stop()
+            self.stop_preserving_primary_error("translation_finally")
         end_x, end_y, end_yaw = self._fresh_pose()
         actual_forward = (end_x - start_x) * forward_axis[0] + (end_y - start_y) * forward_axis[1]
         actual_left = (end_x - start_x) * left_axis[0] + (end_y - start_y) * left_axis[1]
@@ -335,7 +556,7 @@ class NativeBaseControl:
             else:
                 raise TimeoutError("base rotation timed out")
         finally:
-            self.stop()
+            self.stop_preserving_primary_error("rotation_finally")
         end_x, end_y, _ = self._fresh_pose()
         drift = math.hypot(end_x - start_x, end_y - start_y)
         angle_error = math.degrees(accumulated - requested)
@@ -373,20 +594,50 @@ class NativeBaseControl:
 
     def run_stages(self, stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         reports = []
-        for stage in stages:
-            self.active_stage = str(stage["name"])
-            if stage["kind"] == "translate":
-                result = self.translate(float(stage["forward_m"]), float(stage["left_m"]))
-            elif stage["kind"] == "rotate":
-                result = self.rotate(float(stage["ccw_deg"]))
-            else:
-                result = self.approach_front_clearance(float(stage["maximum_forward_m"]),
-                                                       float(stage["front_clearance_m"]))
-            reports.append({"stage": stage["name"], **result})
+        try:
+            for stage in stages:
+                self.active_stage = str(stage["name"])
+                print(json.dumps({
+                    "event": "base_stage",
+                    "stage": self.active_stage,
+                    "status": "starting",
+                }), file=sys.stderr, flush=True)
+                if stage["kind"] == "translate":
+                    result = self.translate(float(stage["forward_m"]), float(stage["left_m"]))
+                elif stage["kind"] == "rotate":
+                    result = self.rotate(float(stage["ccw_deg"]))
+                else:
+                    result = self.approach_front_clearance(float(stage["maximum_forward_m"]),
+                                                           float(stage["front_clearance_m"]))
+                completed = {"stage": stage["name"], "status": "complete", **result}
+                reports.append(completed)
+                self.stage_history.append(completed)
+                print(json.dumps({
+                    "event": "base_stage",
+                    "stage": self.active_stage,
+                    "status": "complete",
+                }), file=sys.stderr, flush=True)
+        except BaseException as exc:
+            self.stage_history.append({
+                "stage": self.active_stage,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            raise
+        finally:
+            # Keep publishing zero briefly even when a stage raises before its
+            # own normal endpoint handling.
+            self.stop_preserving_primary_error("stage_sequence_finally")
         self.active_stage = None
         return reports
 
     def search_letter(self, target_letter: str, output: Path) -> dict[str, Any]:
+        try:
+            return self._search_letter(target_letter, output)
+        finally:
+            self.stop_preserving_primary_error("letter_search_finally")
+
+    def _search_letter(self, target_letter: str, output: Path) -> dict[str, Any]:
         import cv2
 
         search = self.config["letter_search_shanghai_reference"]
@@ -398,10 +649,13 @@ class NativeBaseControl:
         forward_axis = (math.cos(start_yaw), math.sin(start_yaw))
         recent: deque[tuple[float, str, float]] = deque(maxlen=max(5, int(search["stable_frames"])))
         consecutive_misses = 0
+        frames_processed = 0
         last_stamp = self.head_frames[-1][0] if self.head_frames else 0
         last_frame = None
         last_detections = []
         last_tick = time.monotonic()
+        progress_pose = (start_x, start_y)
+        progress_at = time.monotonic()
         deadline = time.monotonic() + max(45.0, float(search["maximum_right_m"]) / float(search["search_speed_mps"]) + 20.0)
         while time.monotonic() < deadline:
             if time.monotonic() - self.head_at > 0.8:
@@ -413,6 +667,7 @@ class NativeBaseControl:
             fresh = [(stamp, frame) for stamp, frame in self.head_frames if stamp > last_stamp]
             for stamp, message in fresh:
                 last_stamp = stamp
+                frames_processed += 1
                 last_frame = decode_raw_bgr(message, int(self.config["head_camera"]["width"]),
                                             int(self.config["head_camera"]["height"]),
                                             self.config["head_camera"]["encodings"])
@@ -439,13 +694,38 @@ class NativeBaseControl:
                     final_x, final_y, _ = self._fresh_pose()
                     measured_right_m = ((final_x - start_x) * right_axis[0]
                                         + (final_y - start_y) * right_axis[1])
-                    output.parent.mkdir(parents=True, exist_ok=True)
-                    if last_frame is not None:
-                        cv2.imwrite(str(output), annotate(last_frame, last_detections))
-                    return {"target": target_letter, "row": rows[-1], "measured_right_m": measured_right_m,
-                            "center_error_normalized": error, "evidence_image": str(output)}
+                    warnings = []
+                    image_saved = False
+                    try:
+                        output.parent.mkdir(parents=True, exist_ok=True)
+                        if last_frame is not None:
+                            image_saved = bool(
+                                cv2.imwrite(str(output), annotate(last_frame, last_detections))
+                            )
+                            if not image_saved:
+                                warnings.append(f"failed to write letter evidence image: {output}")
+                    except Exception as image_exc:
+                        warnings.append(
+                            f"letter evidence image write failed: "
+                            f"{type(image_exc).__name__}: {image_exc}"
+                        )
+                    result = {"target": target_letter, "row": rows[-1],
+                              "measured_right_m": measured_right_m,
+                              "center_error_normalized": error,
+                              "frames_processed": frames_processed}
+                    if image_saved:
+                        result["evidence_image"] = str(output)
+                    if warnings:
+                        result["warnings"] = warnings
+                        for warning in warnings:
+                            print(warning, file=sys.stderr, flush=True)
+                    return result
             if right_m >= float(search["maximum_right_m"]):
-                raise RuntimeError(f"letter {target_letter} was not centered within the configured right-search limit")
+                seen = sorted({item.letter for item in last_detections})
+                raise RuntimeError(
+                    f"letter {target_letter} was not centered within the configured right-search limit "
+                    f"(right_m={right_m:.3f}, frames={frames_processed}, last_seen={seen})"
+                )
             desired_right = float(search["search_speed_mps"])
             if recent and consecutive_misses < 3:
                 image_error = recent[-1][0] - 0.5
@@ -454,10 +734,22 @@ class NativeBaseControl:
                                       float(search["refine_speed_mps"]))
                 if 0.0 < abs(desired_right) < 0.012:
                     desired_right = math.copysign(0.012, desired_right)
+            if math.hypot(x - progress_pose[0], y - progress_pose[1]) > 0.006:
+                progress_pose = (x, y)
+                progress_at = time.monotonic()
+            elif time.monotonic() - progress_at > float(self.config["base_motion"]["no_progress_timeout_s"]):
+                raise RuntimeError(
+                    f"letter {target_letter} search made no odometry progress "
+                    f"(right_m={right_m:.3f}, frames={frames_processed})"
+                )
             yaw_error = wrap(start_yaw - yaw)
             last_tick = self._tick((clamp(-0.9 * forward_drift, -0.025, 0.025), -desired_right,
                                     clamp(1.2 * yaw_error, -0.07, 0.07)), last_tick)
-        raise TimeoutError(f"letter {target_letter} search timed out")
+        seen = sorted({item.letter for item in last_detections})
+        raise TimeoutError(
+            f"letter {target_letter} search timed out "
+            f"(frames={frames_processed}, last_seen={seen})"
+        )
 
 
 class HamburgMission:
@@ -475,6 +767,20 @@ class HamburgMission:
 
     def checkpoint(self, phase: str) -> None:
         self.report["active_phase"] = phase
+        print(json.dumps({
+            "event": "phase",
+            "operation": "mission",
+            "phase": phase,
+        }), file=sys.stderr, flush=True)
+        try:
+            self.persist()
+        except Exception as exc:
+            warning = f"progress_persist: {type(exc).__name__}: {exc}"
+            if warning not in self.report.setdefault("report_warnings", []):
+                self.report["report_warnings"].append(warning)
+            print(warning, file=sys.stderr, flush=True)
+
+    def persist(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         path = self.output_dir / "mission-progress.json"
         temporary = path.with_suffix(".json.tmp")
@@ -488,7 +794,14 @@ class HamburgMission:
         aligned_q, frame = self.arm.visual_align(object_name, self.mount, align_records)
         image = self.output_dir / f"mission-{object_name}-aligned.png"
         from hamburg_grasp_check import save_observation_image
-        save_observation_image(frame, object_name, tuple(align_records[-1]["rim_point_px"]), image)
+        image_saved = True
+        try:
+            save_observation_image(frame, object_name, tuple(align_records[-1]["rim_point_px"]), image)
+        except Exception as image_exc:
+            image_saved = False
+            warning = f"{object_name}_aligned_image_write: {type(image_exc).__name__}: {image_exc}"
+            self.report.setdefault("report_warnings", []).append(warning)
+            print(warning, file=sys.stderr, flush=True)
         descent = float(self.grasp["objects"][object_name]["descent_m"])
         path = cartesian_waypoints(aligned_q, [0.0, 0.0, -descent], self.mount,
                                    float(self.grasp["motion"]["cartesian_waypoint_step_m"]))
@@ -504,11 +817,32 @@ class HamburgMission:
                 self.arm.command_gripper(float(self.grasp["gripper"]["open"]))
                 self.arm.move_arm_targets("left", list(reversed([aligned_q] + path[:-1])))
                 raise RuntimeError(f"{object_name} did not pass the post-lift gripper contact check")
-            return {"object": object_name, "descent_m": descent, "visual_alignment": align_records,
-                    "grasp_evidence": evidence, "aligned_image": str(image)}, aligned_q
-        except BaseException:
-            self.arm.commanded["left"] = list(self.arm.states["left"] or aligned_q)
-            self.arm.move_to_joint_posture("left", aligned_q)
+            result = {"object": object_name, "descent_m": descent,
+                      "visual_alignment": align_records, "grasp_evidence": evidence}
+            if image_saved:
+                result["aligned_image"] = str(image)
+            return result, aligned_q
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            self.report.setdefault("failed_phase", self.report.get("active_phase", "pick"))
+            try:
+                self.arm.commanded["left"] = list(self.arm.states["left"] or aligned_q)
+                self.arm.move_to_joint_posture("left", aligned_q)
+                self.report["pick_recovery"] = {
+                    "object": object_name,
+                    "status": "returned_to_pickup_top",
+                    "object_state_uncertain": True,
+                }
+            except Exception as recovery_exc:
+                self.report.setdefault("recovery_errors", []).append(
+                    f"pick {object_name}: {type(recovery_exc).__name__}: {recovery_exc}"
+                )
+                self.report["pick_recovery"] = {
+                    "object": object_name,
+                    "status": "failed",
+                    "object_state_uncertain": True,
+                }
             raise
 
     def place(self, aligned_q: list[float], row: str, object_name: str) -> dict[str, Any]:
@@ -517,21 +851,30 @@ class HamburgMission:
         down = float(self.grasp["objects"][object_name]["descent_m"])
         forward_path = cartesian_waypoints(aligned_q, [forward, 0.0, 0.0], self.mount,
                                            float(self.grasp["motion"]["cartesian_waypoint_step_m"]))
+        self.report["manipulation_active_step"] = f"{object_name}_place_approach"
         self.arm.move_arm_targets("left", forward_path)
         forward_q = list(self.arm.commanded["left"] or forward_path[-1])
         down_path = cartesian_waypoints(forward_q, [0.0, 0.0, -down], self.mount,
                                         float(self.grasp["motion"]["cartesian_waypoint_step_m"]))
+        self.report["manipulation_active_step"] = f"{object_name}_place_lower"
         self.arm.move_arm_targets("left", down_path)
+        self.report["manipulation_active_step"] = f"{object_name}_release"
         opened = self.arm.command_gripper(float(self.grasp["gripper"]["open"]))
+        self.report["manipulation_active_step"] = f"{object_name}_place_retract"
         self.arm.move_arm_targets("left", list(reversed([forward_q] + down_path[:-1])))
         self.arm.move_arm_targets("left", list(reversed([aligned_q] + forward_path[:-1])))
+        self.report.pop("manipulation_active_step", None)
         return {"row": row, "forward_m": forward, "down_m": down, "open_feedback": opened}
 
     def run(self) -> dict[str, Any]:
         report: dict[str, Any] = {
-            "schema_version": 1, "status": "running", "motion_commanded": True,
+            "schema_version": 1, "status": "running", "motion_commanded": False,
             "single_ros_node_during_motion": True, "assignment": self.mission["assignment"],
             "route_profile_warning": self.mission["profile_warning"],
+            "applied_venue_overrides": {
+                "mission": self.mission.get("applied_venue_overrides", {}),
+                "grasp": self.grasp.get("applied_venue_overrides", {}),
+            },
             "hamburg_measurements": self.mission["hamburg_measurements"], "objects": {},
         }
         self.report = report
@@ -540,6 +883,7 @@ class HamburgMission:
         self.arm.assert_controller_graph()
         self.base.wait_ready()
         self.checkpoint("initialize_spine_and_arms")
+        report["motion_commanded"] = True
         report["spine"] = self.spine.move_absolute(float(self.grasp["spine"]["initial_target_m"]))
         self.arm.move_to_joint_posture("right", self.grasp["posture"]["right_parking_rad"])
         self.arm.move_to_joint_posture("left", self.grasp["posture"]["left_pick_top_rad"])
@@ -549,6 +893,8 @@ class HamburgMission:
             destination = self.mission["assignment"][object_name]
             item: dict[str, Any] = {"destination": destination}
             report["objects"][object_name] = item
+            self.checkpoint(f"{object_name}_reset_pickup_view")
+            self.arm.move_to_joint_posture("left", self.grasp["posture"]["left_pick_top_rad"])
             self.checkpoint(f"{object_name}_observe_align_pick")
             item["pick"], aligned_q = self.pick(object_name)
             self.checkpoint(f"{object_name}_post_pick_route")
@@ -595,54 +941,128 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    mission = json.loads(args.config.read_text(encoding="utf-8"))
-    validate_mission_config(mission)
-    grasp = load_cycle_config(args.grasp_config)
+    report_path = args.output or args.output_dir / "mission-report.json"
+    try:
+        mission = json.loads(args.config.read_text(encoding="utf-8"))
+        validate_mission_config(mission)
+        grasp = load_cycle_config(args.grasp_config)
+        validate_combined_configs(mission, grasp)
+    except Exception as exc:
+        write_report({
+            "status": "invalid_configuration",
+            "motion_commanded": False,
+            "failed_phase": "load_and_validate_configuration",
+            "errors": [f"{type(exc).__name__}: {exc}"],
+            "traceback": traceback.format_exc(),
+        }, report_path)
+        return 2
     if not args.execute:
         write_report(plan_report(mission, grasp), args.output)
         return 0
-    venue = load_config(args.venue_config)
-    environment, errors = environment_report(venue)
+    try:
+        venue = load_config(args.venue_config)
+        grasp = resolve_cycle_venue_overrides(grasp, venue)
+        mission = resolve_mission_venue_overrides(mission, venue)
+        environment, errors = environment_report(venue)
+    except Exception as exc:
+        write_report({
+            "status": "invalid_environment",
+            "motion_commanded": False,
+            "failed_phase": "load_and_validate_venue",
+            "errors": [f"{type(exc).__name__}: {exc}"],
+            "traceback": traceback.format_exc(),
+        }, report_path)
+        return 2
     if errors:
         write_report({"status": "blocked", "motion_commanded": False,
-                      "environment": environment, "errors": errors}, args.output)
+                      "environment": environment, "errors": errors}, report_path)
         return 2
-    import rclpy
-    from rclpy.node import Node
 
-    rclpy.init(args=None)
-    node = Node("tmr_task3_hamburg_single_node_mission")
+    rclpy = None
+    node = None
+    rclpy_started = False
     spine: SpineControl | None = None
     base: NativeBaseControl | None = None
     mission_runner: HamburgMission | None = None
+    report: dict[str, Any] = {"status": "starting", "motion_commanded": False}
     try:
+        import rclpy as rclpy_module
+        from rclpy.node import Node
+
+        rclpy = rclpy_module
+        rclpy.init(args=None)
+        rclpy_started = True
+        node = Node("tmr_task3_hamburg_single_node_mission")
         arm = NativeArmGraspCycle(node, venue, grasp, args.output_dir)
         base = NativeBaseControl(node, arm, mission)
         spine = SpineControl(node, venue["interface_profile"]["spine"])
         mission_runner = HamburgMission(arm, base, spine, mission, grasp, args.output_dir)
         report = mission_runner.run()
     except KeyboardInterrupt:
-        if base is not None:
-            base.stop(1.0)
         report = dict(mission_runner.report) if mission_runner is not None else {}
+        report.setdefault("failed_phase", report.get("active_phase", "startup"))
         if base is not None and base.active_stage is not None:
             report["base_active_stage"] = base.active_stage
-        report.update({"status": "interrupted", "motion_commanded": True,
-                       "errors": ["operator interrupted the mission"], "zero_base_command_latched": True})
+        if report.get("manipulation_active_step"):
+            report["object_state_uncertain"] = True
+            report["operator_action_required"] = (
+                "inspect the left gripper and arm pose before restarting"
+            )
+        report.update({"status": "interrupted",
+                       "motion_commanded": bool(report.get("motion_commanded", False)),
+                       "errors": ["operator interrupted the mission"]})
     except BaseException as exc:
-        if base is not None:
-            base.stop(1.0)
         report = dict(mission_runner.report) if mission_runner is not None else {}
+        report.setdefault("failed_phase", report.get("active_phase", "startup"))
         if base is not None and base.active_stage is not None:
             report["base_active_stage"] = base.active_stage
-        report.update({"status": "failed", "motion_commanded": True,
-                       "errors": [f"{type(exc).__name__}: {exc}"], "zero_base_command_latched": True})
+        if report.get("manipulation_active_step"):
+            report["object_state_uncertain"] = True
+            report["operator_action_required"] = (
+                "inspect the left gripper and arm pose before restarting"
+            )
+        report.update({"status": "failed",
+                       "motion_commanded": bool(report.get("motion_commanded", False)),
+                       "errors": [f"{type(exc).__name__}: {exc}"],
+                       "traceback": traceback.format_exc()})
     finally:
+        cleanup_errors = []
+        if base is not None:
+            try:
+                base.stop(1.0)
+                report["zero_base_command_latched"] = True
+            except Exception as stop_exc:
+                cleanup_errors.append(f"base_stop: {type(stop_exc).__name__}: {stop_exc}")
+                report["zero_base_command_latched"] = False
+            report["base_diagnostics"] = base.diagnostic_snapshot()
+        if mission_runner is not None:
+            report["arm_diagnostics"] = mission_runner.arm.diagnostic_snapshot()
         if spine is not None:
-            spine.close()
-        node.destroy_node()
-        rclpy.shutdown()
-    write_report(report, args.output)
+            report["spine_diagnostics"] = spine.diagnostic_snapshot()
+        for label, operation in (
+            ("spine_close", spine.close if spine is not None else None),
+            ("node_destroy", node.destroy_node if node is not None else None),
+            ("rclpy_shutdown", rclpy.shutdown if rclpy is not None and rclpy_started else None),
+        ):
+            if operation is None:
+                continue
+            try:
+                operation()
+            except Exception as cleanup_exc:
+                cleanup_errors.append(f"{label}: {type(cleanup_exc).__name__}: {cleanup_exc}")
+        if cleanup_errors:
+            report.setdefault("cleanup_errors", []).extend(cleanup_errors)
+            if report.get("status") == "complete":
+                report["status"] = "failed_cleanup"
+        if mission_runner is not None:
+            mission_runner.report = report
+            try:
+                mission_runner.persist()
+            except Exception as persist_exc:
+                report.setdefault("cleanup_errors", []).append(
+                    f"progress_persist: {type(persist_exc).__name__}: {persist_exc}"
+                )
+    write_report(report, report_path)
     return 0 if report.get("status") == "complete" else 2
 
 

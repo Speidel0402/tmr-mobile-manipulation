@@ -16,8 +16,17 @@ relative, activation-referenced teleoperation input rather than an absolute
 robot-joint target. The execution layer now publishes measured joints as the
 neutral pre-activation sample, encodes absolute targets with the confirmed
 seven-joint direction map, and maintains that stream during every blocking
-spine wait and all other phases. Robot-space IK, limits, trajectories and
-following diagnostics remain unchanged.
+spine wait and all other phases. A serialized keepalive publisher fills gaps
+during image processing, IK and report writes without changing the normal
+trajectory rate; it is stopped before the ROS node is destroyed. Robot-space
+IK, limits, trajectories and following diagnostics remain unchanged.
+
+The repository pick/place montage was reviewed alongside the Shanghai source.
+It shows the left arm handling cup, bowl and plate in that order while the right
+arm remains parked. The Hamburg code retains those postures, object order,
+per-object descents, visual target/Jacobian and B/A/D destination assignment.
+The montage is evidence of the intended Shanghai sequence, not evidence that
+Hamburg room or table geometry is equivalent.
 
 Cup/bowl/plate descents and near/far placement paths pass offline IK checks
 against the official FR3v2 chain and joint limits. The 50 Hz smooth command

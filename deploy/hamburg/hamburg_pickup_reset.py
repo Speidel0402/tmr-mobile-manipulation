@@ -54,7 +54,6 @@ def plan_report(config: dict[str, Any]) -> dict[str, Any]:
             "capture a fresh left-wrist image for table and utensil placement review",
         ],
         "parameter_profile": config["profile_name"],
-        "arm_command_interface": config["arm_command_interface"],
         "parameter_scope": config["parameter_scope"],
         "arm_motion": {
             key: config["motion"][key] for key in (
@@ -262,6 +261,10 @@ def main() -> int:
                     f"{label}: {type(diagnostic_exc).__name__}: {diagnostic_exc}"
                 )
         for label, operation in (
+            (
+                "arm_keepalive_stop",
+                runner.stop_arm_keepalive if runner is not None else None,
+            ),
             ("spine_close", spine.close if spine is not None else None),
             ("node_destroy", node.destroy_node if node is not None else None),
             ("rclpy_shutdown", rclpy.shutdown if rclpy is not None and rclpy_started else None),

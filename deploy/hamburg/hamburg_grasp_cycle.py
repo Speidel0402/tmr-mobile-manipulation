@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 import traceback
 from typing import Any
@@ -421,6 +422,14 @@ class NativeArmGraspCycle:
         self.last_arm_publish_at = 0.0
         self.arm_publish_count = 0
         self.arm_command_sync: dict[str, Any] | None = None
+        self.arm_publish_lock = threading.RLock()
+        self.arm_keepalive_stop = threading.Event()
+        self.arm_keepalive_error: str | None = None
+        self.arm_keepalive_thread = threading.Thread(
+            target=self._arm_keepalive_loop,
+            name="tmr_hamburg_arm_keepalive",
+            daemon=True,
+        )
         self.neutral_stream_started_at = 0.0
         self.neutral_initial_pose: dict[str, list[float]] | None = None
         self.neutral_peak_drift = {"left": 0.0, "right": 0.0}
@@ -467,10 +476,50 @@ class NativeArmGraspCycle:
             "right": node.create_publisher(JointState, topics["right_joint_target"], 10),
         }
         self.gripper_publisher = node.create_publisher(Float32, topics["left_gripper_target"], 10)
+        self.arm_keepalive_thread.start()
+
+    def _arm_keepalive_loop(self) -> None:
+        period = 1.0 / float(self.config["motion"]["publish_rate_hz"])
+        while not self.arm_keepalive_stop.is_set():
+            last_publish = self.last_arm_publish_at
+            delay = period
+            if last_publish > 0.0:
+                delay = max(0.001, period - (time.monotonic() - last_publish))
+            if self.arm_keepalive_stop.wait(delay):
+                return
+            # The control loop remains the primary 50 Hz publisher. Fill only a
+            # real gap so the keepalive does not double the normal command rate.
+            last_publish = self.last_arm_publish_at
+            if (
+                last_publish > 0.0
+                and time.monotonic() - last_publish < period * 0.9
+            ):
+                continue
+            try:
+                self.publish_arm_holds()
+            except Exception as exc:
+                self.arm_keepalive_error = f"{type(exc).__name__}: {exc}"
+                print(json.dumps({
+                    "event": "arm_keepalive_failed",
+                    "error": self.arm_keepalive_error,
+                }), file=sys.stderr, flush=True)
+                return
+
+    def stop_arm_keepalive(self) -> None:
+        self.arm_keepalive_stop.set()
+        self.arm_keepalive_thread.join(timeout=1.0)
+        if self.arm_keepalive_thread.is_alive():
+            raise RuntimeError("arm keepalive thread did not stop")
+        self._raise_arm_keepalive_error()
+
+    def _raise_arm_keepalive_error(self) -> None:
+        if self.arm_keepalive_error is not None:
+            raise RuntimeError(f"arm keepalive failed: {self.arm_keepalive_error}")
 
     def spin_for(self, seconds: float, *, publish_hold: bool = True) -> None:
         import rclpy
 
+        self._raise_arm_keepalive_error()
         deadline = time.monotonic() + seconds
         period = 1.0 / float(self.config["motion"]["publish_rate_hz"])
         while time.monotonic() < deadline:
@@ -478,6 +527,7 @@ class NativeArmGraspCycle:
             rclpy.spin_once(self.node, timeout_sec=0.0)
             if publish_hold and all(self.commanded.values()):
                 self.publish_arm_holds()
+            self._raise_arm_keepalive_error()
             remaining = period - (time.monotonic() - started)
             if remaining > 0.0:
                 time.sleep(remaining)
@@ -533,6 +583,8 @@ class NativeArmGraspCycle:
                 if self.last_arm_publish_at > 0.0 else None
             ),
             "arm_publish_count": self.arm_publish_count,
+            "arm_keepalive_thread_alive": self.arm_keepalive_thread.is_alive(),
+            "arm_keepalive_error": self.arm_keepalive_error,
             "arm_command_sync": self.arm_command_sync,
             "gripper_sample_count": len(self.gripper_samples),
             "latest_gripper_feedback": (
@@ -613,36 +665,37 @@ class NativeArmGraspCycle:
         return counts
 
     def publish_arm_holds(self) -> None:
-        published_any = False
-        for arm in ("left", "right"):
-            values = self.commanded[arm]
-            if values is None:
-                continue
-            mode = self.config["arm_command_interface"]["control_mode"]
-            if mode == RELATIVE_GELLO_MODE:
-                robot_zero = self.robot_activation_reference[arm]
-                input_zero = self.input_activation_reference[arm]
-                if robot_zero is None or input_zero is None:
+        with self.arm_publish_lock:
+            published_any = False
+            for arm in ("left", "right"):
+                values = self.commanded[arm]
+                if values is None:
                     continue
-                published = encode_arm_command(
-                    values,
-                    robot_zero,
-                    input_zero,
-                    self.config["arm_command_interface"]["direction"],
-                )
-            else:
-                published = list(values)
-            message = self.JointState()
-            message.header.stamp = self.node.get_clock().now().to_msg()
-            message.header.frame_id = "tmr_hamburg_autonomous_gello_input"
-            message.name = list(self.config["joint_names"][arm])
-            message.position = published
-            self.arm_publishers[arm].publish(message)
-            self.last_published_arm_input[arm] = list(published)
-            published_any = True
-        if published_any:
-            self.last_arm_publish_at = time.monotonic()
-            self.arm_publish_count += 1
+                mode = self.config["arm_command_interface"]["control_mode"]
+                if mode == RELATIVE_GELLO_MODE:
+                    robot_zero = self.robot_activation_reference[arm]
+                    input_zero = self.input_activation_reference[arm]
+                    if robot_zero is None or input_zero is None:
+                        continue
+                    published = encode_arm_command(
+                        values,
+                        robot_zero,
+                        input_zero,
+                        self.config["arm_command_interface"]["direction"],
+                    )
+                else:
+                    published = list(values)
+                message = self.JointState()
+                message.header.stamp = self.node.get_clock().now().to_msg()
+                message.header.frame_id = "tmr_hamburg_autonomous_gello_input"
+                message.name = list(self.config["joint_names"][arm])
+                message.position = published
+                self.arm_publishers[arm].publish(message)
+                self.last_published_arm_input[arm] = list(published)
+                published_any = True
+            if published_any:
+                self.last_arm_publish_at = time.monotonic()
+                self.arm_publish_count += 1
 
     def _start_neutral_arm_stream(self) -> None:
         """Start the pre-activation neutral stream at the first complete arm sample."""
@@ -1202,6 +1255,10 @@ def main() -> int:
     finally:
         cleanup_errors = []
         for label, operation in (
+            (
+                "arm_keepalive_stop",
+                runner.stop_arm_keepalive if runner is not None else None,
+            ),
             ("spine_close", spine.close if spine is not None else None),
             ("node_destroy", node.destroy_node if node is not None else None),
             ("rclpy_shutdown", rclpy.shutdown if rclpy is not None and rclpy_started else None),

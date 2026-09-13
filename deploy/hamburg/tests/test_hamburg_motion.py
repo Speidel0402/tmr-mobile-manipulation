@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -127,6 +128,7 @@ class HamburgMotionTests(unittest.TestCase):
         runner.node = mock.Mock()
         runner.node.get_clock.return_value.now.return_value.to_msg.return_value = object()
         runner.arm_publishers = {"left": mock.Mock(), "right": mock.Mock()}
+        runner.arm_publish_lock = threading.RLock()
         runner.robot_activation_reference = {
             "left": [0.0] * 7, "right": [0.1] * 7
         }
@@ -148,6 +150,45 @@ class HamburgMotionTests(unittest.TestCase):
         )
         self.assertEqual(runner.commanded["left"][0], 0.2)
         self.assertEqual(runner.arm_publish_count, 1)
+
+    def test_dedicated_arm_keepalive_covers_main_thread_gaps(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.config["motion"]["publish_rate_hz"] = 200.0
+        runner.arm_keepalive_stop = threading.Event()
+        runner.arm_keepalive_error = None
+        runner.last_arm_publish_at = 0.0
+        runner.publish_arm_holds = mock.Mock()
+        runner.arm_keepalive_thread = threading.Thread(
+            target=runner._arm_keepalive_loop,
+            daemon=True,
+        )
+        runner.arm_keepalive_thread.start()
+        deadline = time.monotonic() + 0.2
+        while runner.publish_arm_holds.call_count < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        runner.stop_arm_keepalive()
+
+        self.assertGreaterEqual(runner.publish_arm_holds.call_count, 3)
+        self.assertFalse(runner.arm_keepalive_thread.is_alive())
+        self.assertIsNone(runner.arm_keepalive_error)
+
+    def test_keepalive_failure_is_never_reported_as_success(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.arm_keepalive_stop = threading.Event()
+        runner.arm_keepalive_error = None
+        runner.last_arm_publish_at = 0.0
+        runner.publish_arm_holds = mock.Mock(side_effect=RuntimeError("publisher failed"))
+        runner.arm_keepalive_thread = threading.Thread(
+            target=runner._arm_keepalive_loop,
+            daemon=True,
+        )
+        runner.arm_keepalive_thread.start()
+        runner.arm_keepalive_thread.join(timeout=0.2)
+
+        with self.assertRaisesRegex(RuntimeError, "arm keepalive failed.*publisher failed"):
+            runner.stop_arm_keepalive()
 
     def test_wait_live_starts_neutral_stream_before_other_inputs_arrive(self) -> None:
         runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)

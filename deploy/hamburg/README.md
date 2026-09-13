@@ -52,8 +52,10 @@ No physical GELLO leader or manual teleoperation is used. Before any requested
 arm motion, the runner continuously publishes the current measured joints as a
 neutral input. Start the physical entrypoint with the arm controllers inactive
 or ready to activate so they capture that neutral sample. The same input is
-kept alive while the spine action, cameras, gripper and base loops run; Hamburg
-reports that a stale GELLO stream zeroes torque and stops the controller. If an
+kept alive by a dedicated lightweight publisher that fills gaps while the
+spine action, image processing, IK, evidence writing, gripper and base work
+run; the normal trajectory rate is unchanged. Hamburg reports that a stale
+GELLO stream zeroes torque and stops the controller. If an
 arm moves during neutral synchronization, the run stops before the parking
 trajectory and reports that the controller must be reactivated with the neutral
 stream present.
@@ -63,9 +65,9 @@ Hamburg path does not depend on MoveIt, PTP, IK/FK services, or Robotiq actions.
 
 Each physical entrypoint creates one ROS node and
 constructs all subscriptions, publishers, action clients, and service clients
-before active motion. They keep publishing arm hold targets while the base,
-vision, and gripper loops run. No phase starts a child process or creates a new
-DDS participant.
+before active motion. A gap-filling publisher keeps arm hold targets flowing
+while the base, vision, IK, evidence, and gripper work runs. No phase starts a
+child process or creates a new DDS participant.
 
 ## Camera resolution and coordinates
 

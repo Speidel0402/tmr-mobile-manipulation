@@ -989,6 +989,7 @@ def main() -> int:
     rclpy = None
     node = None
     rclpy_started = False
+    arm: NativeArmGraspCycle | None = None
     spine: SpineControl | None = None
     base: NativeBaseControl | None = None
     mission_runner: HamburgMission | None = None
@@ -1052,6 +1053,10 @@ def main() -> int:
         if spine is not None:
             report["spine_diagnostics"] = spine.diagnostic_snapshot()
         for label, operation in (
+            (
+                "arm_keepalive_stop",
+                arm.stop_arm_keepalive if arm is not None else None,
+            ),
             ("spine_close", spine.close if spine is not None else None),
             ("node_destroy", node.destroy_node if node is not None else None),
             ("rclpy_shutdown", rclpy.shutdown if rclpy is not None and rclpy_started else None),

@@ -14,12 +14,14 @@ during activation. Every later absolute robot target is encoded as
 confirmed direction `[-1,-1,1,1,1,1,-1]`. Absolute robot coordinates are still
 used internally for FR3v2 limits, IK, trajectories and following checks.
 
-The encoded hold stream is now maintained continuously, including while waiting
-for the native spine action/service and throughout camera, gripper and base
-phases. Reports include both activation references, the last encoded input,
-publish age/count and any synchronization drift. If a controller was already
-activated against an incompatible old input and the arm moves during neutral
-synchronization, the run stops before the parking trajectory with an explicit
+The encoded hold stream is now maintained continuously by a gap-filling
+publisher, including during image processing, IK, evidence writing, the native
+spine action/service, and gripper and base phases, without changing the normal
+trajectory rate. Reports include both activation references, the last encoded
+input, publish age/count, keepalive health and any
+synchronization drift. If a controller was already activated against an
+incompatible old input and the arm moves during neutral synchronization, the
+run stops before the parking trajectory with an explicit
 reactivation message.
 
 The same implementation is used by `pickup-reset`, all cup/bowl/plate

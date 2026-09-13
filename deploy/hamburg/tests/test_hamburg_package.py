@@ -456,7 +456,11 @@ class HamburgPackageTests(unittest.TestCase):
 
     def test_arm64_humble_container(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("--platform=linux/arm64", dockerfile)
+        workflow = (ROOT.parents[1] / ".github" / "workflows" / "hamburg-package.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("platforms: linux/arm64", workflow)
+        self.assertNotIn("--platform=linux/arm64", dockerfile)
         self.assertIn("ros:humble-ros-base-jammy", dockerfile)
         self.assertIn("python3-opencv", dockerfile)
         self.assertIn("grasp/scripts/cup_rim_detector.py", dockerfile)

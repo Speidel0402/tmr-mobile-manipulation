@@ -19,15 +19,21 @@ and approximately all three objects before starting the grasp checks.
 ./deploy/hamburg/run_hamburg.sh check \
   --output /tmp/hamburg-check.json
 
+# Reset the observation pose only; this command does not grasp an object.
 ./deploy/hamburg/run_hamburg.sh pickup-reset
 ./deploy/hamburg/run_hamburg.sh pickup-reset --execute \
   --output /tmp/pickup-reset.json \
   --output-dir /tmp/pickup-reset-evidence
 
+# Observe and grasp the cup, then return it to the pickup position.
 ./deploy/hamburg/run_hamburg.sh grasp-test --object cup --execute \
   --output /tmp/cup-grasp.json --output-dir /tmp/cup-evidence
+
+# Observe and grasp the food bowl, then return it to the pickup position.
 ./deploy/hamburg/run_hamburg.sh grasp-test --object bowl --execute \
   --output /tmp/bowl-grasp.json --output-dir /tmp/bowl-evidence
+
+# Observe and grasp the plate, then return it to the pickup position.
 ./deploy/hamburg/run_hamburg.sh grasp-test --object plate --execute \
   --output /tmp/plate-grasp.json --output-dir /tmp/plate-evidence
 ```

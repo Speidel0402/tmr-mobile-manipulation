@@ -47,12 +47,14 @@ def plan_report(config: dict[str, Any]) -> dict[str, Any]:
         ),
         "phases": [
             "validate native arm, gripper, spine, and 640x480 left-wrist interfaces",
+            "stream current measured joints as neutral GELLO inputs before activation",
             "move the spine to the configured pickup-view height",
             "park the right arm and move the left arm to the pickup-view posture",
             "open the left gripper",
             "capture a fresh left-wrist image for table and utensil placement review",
         ],
         "parameter_profile": config["profile_name"],
+        "arm_command_interface": config["arm_command_interface"],
         "parameter_scope": config["parameter_scope"],
         "arm_motion": {
             key: config["motion"][key] for key in (
@@ -61,6 +63,7 @@ def plan_report(config: dict[str, Any]) -> dict[str, Any]:
                 "maximum_following_error_rad", "following_error_recovery_timeout_s",
             )
         },
+        "arm_command_interface": config["arm_command_interface"],
     }
 
 
@@ -92,9 +95,17 @@ def run_reset(
         "phases_completed": [],
     }
     runner.last_report = report
+    runner.set_phase(report, "preactivation_command_owner_check")
+    report["preactivation_controller_graph"] = runner.assert_controller_graph(
+        require_subscribers=False
+    )
     runner.set_phase(report, "wait_for_live_interfaces")
     runner.wait_live(10.0)
+
+    runner.set_phase(report, "neutral_arm_command_activation_sync")
+    report["arm_command_sync"] = runner.synchronize_arm_command_interface()
     report["controller_subscriber_counts"] = runner.assert_controller_graph()
+    report["phases_completed"].append("neutral_arm_command_stream_ready")
 
     runner.set_phase(report, "spine_to_pickup_view_height")
     report["motion_commanded"] = True
@@ -218,7 +229,11 @@ def main() -> int:
         rclpy_started = True
         node = Node("tmr_task3_hamburg_pickup_reset")
         runner = NativeArmGraspCycle(node, venue, config, args.output_dir)
-        spine = SpineControl(node, venue["interface_profile"]["spine"])
+        spine = SpineControl(
+            node,
+            venue["interface_profile"]["spine"],
+            heartbeat=runner.publish_arm_holds,
+        )
         report = run_reset(runner, spine, config, args.output_dir)
     except KeyboardInterrupt:
         report = dict(runner.last_report) if runner is not None else report

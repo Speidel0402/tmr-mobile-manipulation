@@ -30,10 +30,15 @@
     "left_wrist_image": "/wrist_camera_left/camera/color/image_raw"
   },
   "arm_command_interface": {
-    "description": "native autonomous arm joint-target input; topic name is retained from the deployed controller and does not require a GELLO leader",
+    "description": "Hamburg relative, direction-mapped GELLO-teleop input driven by autonomous robot-space targets; no GELLO leader is required",
     "message_type": "sensor_msgs/msg/JointState",
     "units": "radian",
-    "control_mode": "continuous joint target consumed by the deployed Franka joint-impedance controller"
+    "control_mode": "relative_direction_mapped_gello",
+    "direction": [-1, -1, 1, 1, 1, 1, -1],
+    "requires_pre_activation_neutral_sample": true,
+    "activation_sync_duration_s": 1.0,
+    "activation_sync_maximum_drift_rad": 0.05,
+    "stale_input_behavior": "controller zeroes torque and stops when the GELLO stream becomes stale"
   },
   "joint_names": {
     "left": [

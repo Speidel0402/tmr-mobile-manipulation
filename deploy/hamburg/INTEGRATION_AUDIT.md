@@ -11,15 +11,25 @@ or Stage 1. The minimum Hamburg adaptation now provides:
   letter centering, placement and return, all in one node;
 - site-config: explicit measured overrides without editing the launcher.
 
+Hamburg trial 2 established that `/{left,right}/gello/joint_states` is a
+relative, activation-referenced teleoperation input rather than an absolute
+robot-joint target. The execution layer now publishes measured joints as the
+neutral pre-activation sample, encodes absolute targets with the confirmed
+seven-joint direction map, and maintains that stream during every blocking
+spine wait and all other phases. Robot-space IK, limits, trajectories and
+following diagnostics remain unchanged.
+
 Cup/bowl/plate descents and near/far placement paths pass offline IK checks
 against the official FR3v2 chain and joint limits. The 50 Hz smooth command
 stream accounts for its peak interpolation velocity. Physical reports remain
 the evidence for controller timing, calibration and success.
 
-Reference sources: Franka's
+Franka's official
 [follower controller](https://github.com/frankarobotics/franka_follower_controllers)
-explicitly accepts low-frequency absolute joint targets from teleoperation or
-AI publishers, and the local solver uses the official FR3v2
+provides an absolute-joint follower for low-frequency publishers. Hamburg's
+deployed `/gello/joint_states` endpoint has different, organizer-confirmed
+relative semantics, so this package does not treat the two interfaces as
+interchangeable. The local solver continues to use the official FR3v2
 [kinematics](https://github.com/frankarobotics/franka_description/blob/main/robots/fr3v2/kinematics.yaml)
 and [joint limits](https://github.com/frankarobotics/franka_description/blob/main/robots/fr3v2/joint_limits.yaml).
 

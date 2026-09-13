@@ -133,6 +133,13 @@ class HamburgPackageTests(unittest.TestCase):
         self.assertEqual(profile["spine"]["action_type"], "franka_spine_msgs/action/MoveAbsolute")
         self.assertEqual(profile["spine"]["position_service_type"], "franka_spine_msgs/srv/GetPosition")
         self.assertEqual(profile["spine"]["home_m"], 0.7)
+        self.assertEqual(
+            profile["arm_command"]["semantics"],
+            "relative_direction_mapped_gello",
+        )
+        self.assertEqual(
+            profile["arm_command"]["direction"], [-1, -1, 1, 1, 1, 1, -1]
+        )
         self.assertEqual((profile["head_camera"]["width"], profile["head_camera"]["height"]), (640, 360))
         self.assertEqual(profile["head_camera"]["zed_pub_resolution"], "CUSTOM")
         organizer_text = (ROOT / "ORGANIZER_ACTIONS.md").read_text(
@@ -412,6 +419,7 @@ class HamburgPackageTests(unittest.TestCase):
             "rosidl_runtime_py.utilities": fake_utilities,
             "action_msgs.msg": fake_status,
         }):
+            heartbeat = mock.Mock()
             controller = module.SpineControl(node, {
                 "interface": "action",
                 "action_type": "franka_spine_msgs/action/MoveAbsolute",
@@ -420,7 +428,7 @@ class HamburgPackageTests(unittest.TestCase):
                 "position_service": "/franka_spine_node/get_position",
                 "minimum_m": 0.0,
                 "maximum_m": 0.8,
-            })
+            }, heartbeat=heartbeat)
             report = controller.move_absolute(0.7)
             controller.close()
         self.assertTrue(report["moved"])
@@ -428,6 +436,7 @@ class HamburgPackageTests(unittest.TestCase):
         goal = action_client.send_goal_async.call_args.args[0]
         self.assertEqual((goal.position, goal.velocity), (0.7, 0.05))
         self.assertEqual((goal.acceleration, goal.deceleration), (0.1, 0.1))
+        self.assertGreater(heartbeat.call_count, 0)
         node.destroy_client.assert_called_once_with(position_client)
 
     def test_udp_only_fastdds_profile_validation(self) -> None:

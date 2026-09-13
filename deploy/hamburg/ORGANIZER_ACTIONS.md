@@ -7,11 +7,19 @@ the mission calls MoveAbsolute directly.
 Stop manual publishers to the arm, gripper and base command topics during the
 autonomous run.
 
-The first Hamburg trial showed fresh right-arm tracking that lagged the parking
-ramp. The current code keeps the original ramp and gives the hard following
-guard measured margin. A higher-lag fallback holds the current target while the
-controller catches up. The feedback-age check and final target tolerance remain
-active. No extra override is required for the first retry.
+Keep the left and right joint-impedance controllers inactive when starting a
+physical entrypoint, then let the normal Hamburg activation procedure activate
+them while this runner is publishing. The runner first sends each arm's current
+measured joints as a neutral GELLO sample, then continuously maintains the
+stream. It converts every absolute robot target with Hamburg's confirmed
+direction map `[-1,-1,1,1,1,1,-1]`. Do not pre-activate the controller against
+an older GELLO sample and do not publish robot-space targets directly to the
+GELLO topic.
+
+The earlier constant following error came from treating this relative interface
+as absolute. The following-error guard, catch-up behavior, feedback-age check
+and final target tolerance remain active after the encoding correction. No
+speed or timing override is required for the first retry.
 
 Place the cup, bowl and plate in the normal pickup arrangement, then manually
 place the stopped robot beside the pickup table with clear arm workspace. Run
@@ -57,7 +65,8 @@ venue override and keep the resulting JSON:
 
 Do not change the wrist calibration, object descent or route for this symptom.
 The report records the resolved speed, following limits, hold/recovery events,
-measured joints and feedback ages.
+measured joints, encoded GELLO inputs, activation references, publish count and
+feedback ages.
 
 Phase transitions are printed to the terminal and written atomically to the
 output directory. Please preserve the terminal output as well as the final JSON;

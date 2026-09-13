@@ -3,7 +3,9 @@
 
 The controller topic happens to contain ``gello`` in its deployed name.  This
 module does not use a GELLO leader or teleoperation; it computes autonomous
-FR3v2 targets and validates them against the official robot model.
+FR3v2 targets and validates them against the official robot model.  The runtime
+publisher converts these robot-space targets to Hamburg's activation-referenced,
+direction-mapped input convention.
 """
 
 from __future__ import annotations

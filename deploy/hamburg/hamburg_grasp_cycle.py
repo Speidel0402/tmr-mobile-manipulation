@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Run one autonomous Hamburg observation-to-grasp-to-release trial.
 
-The deployed Franka controller consumes JointState targets on topics whose
-names contain ``gello``.  No GELLO leader is used here: this single ROS node
-computes and streams autonomous targets directly to that controller input.
+The deployed Franka controller consumes relative, direction-mapped JointState
+inputs on topics whose names contain ``gello``.  No GELLO leader is used here:
+this node converts autonomous robot-space targets at the publisher boundary,
+after first streaming a neutral activation sample.
 """
 
 from __future__ import annotations
@@ -38,6 +39,54 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_CYCLE_CONFIG = HERE / "config" / "grasp-cycle-shanghai-reference.json"
 DEFAULT_VENUE_CONFIG = HERE / "config" / "venue.json"
 OBJECTS = ("cup", "bowl", "plate")
+RELATIVE_GELLO_MODE = "relative_direction_mapped_gello"
+ABSOLUTE_JOINT_MODE = "absolute_robot_joint_positions"
+DEFAULT_GELLO_DIRECTION = [-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0]
+
+
+def encode_arm_command(
+    robot_target: list[float],
+    robot_at_activation: list[float],
+    input_at_activation: list[float],
+    direction: list[float],
+) -> list[float]:
+    """Encode an absolute robot target for Hamburg's relative GELLO input."""
+    arrays = [
+        np.asarray(values, dtype=float)
+        for values in (robot_target, robot_at_activation, input_at_activation, direction)
+    ]
+    if any(values.shape != (7,) or not np.all(np.isfinite(values)) for values in arrays):
+        raise ValueError("arm command target, references, and direction must be seven finite values")
+    target, robot_zero, input_zero, signs = arrays
+    if np.any(np.abs(signs) != 1.0):
+        raise ValueError("arm command direction values must be -1 or 1")
+    return (input_zero + signs * (target - robot_zero)).tolist()
+
+
+def validate_arm_command_interface(interface: dict[str, Any]) -> None:
+    if interface.get("message_type") != "sensor_msgs/msg/JointState":
+        raise ValueError("arm command interface must be sensor_msgs/msg/JointState")
+    mode = str(interface["control_mode"])
+    if mode not in {RELATIVE_GELLO_MODE, ABSOLUTE_JOINT_MODE}:
+        raise ValueError(f"unsupported arm command control_mode {mode!r}")
+    if mode == RELATIVE_GELLO_MODE and interface.get(
+        "requires_pre_activation_neutral_sample"
+    ) is not True:
+        raise ValueError(
+            "relative GELLO mode requires a pre-activation neutral sample"
+        )
+    direction = interface["direction"]
+    if (
+        not isinstance(direction, list) or len(direction) != 7
+        or any(float(value) not in {-1.0, 1.0} for value in direction)
+    ):
+        raise ValueError("arm command direction must contain seven values equal to -1 or 1")
+    duration = float(interface["activation_sync_duration_s"])
+    drift = float(interface["activation_sync_maximum_drift_rad"])
+    if not math.isfinite(duration) or not 0.0 < duration <= 10.0:
+        raise ValueError("arm activation sync duration must be in (0, 10] seconds")
+    if not math.isfinite(drift) or not 0.0 < drift <= 0.20:
+        raise ValueError("arm activation sync maximum drift must be in (0, 0.20] rad")
 
 
 def validate_motion_config(motion: dict[str, Any]) -> None:
@@ -103,7 +152,7 @@ def load_cycle_config(path: Path) -> dict[str, Any]:
     quaternion = np.asarray(data["posture"]["left_tool_quaternion_xyzw"], dtype=float)
     if quaternion.shape != (4,) or not np.all(np.isfinite(quaternion)) or np.linalg.norm(quaternion) < 1.0e-6:
         raise ValueError("posture.left_tool_quaternion_xyzw must be a non-zero finite quaternion")
-    # Config copies made from the previous Hamburg commit remain runnable.  The
+    # Config copies made from previous Hamburg commits remain runnable.  The
     # new defaults add a separate posture-speed override and a bounded
     # hold-and-catch-up window without changing an older file's normal ramp.
     motion = data["motion"]
@@ -116,6 +165,25 @@ def load_cycle_config(path: Path) -> dict[str, Any]:
     )
     motion.setdefault("following_error_recovery_timeout_s", 5.0)
     validate_motion_config(motion)
+    arm_command = data["arm_command_interface"]
+    if arm_command.get("control_mode") == (
+        "continuous joint target consumed by the deployed Franka joint-impedance controller"
+    ):
+        arm_command["control_mode"] = RELATIVE_GELLO_MODE
+        arm_command["description"] = (
+            "Hamburg relative, direction-mapped GELLO-teleop input driven by "
+            "autonomous robot-space targets; no GELLO leader is required"
+        )
+    arm_command.setdefault("control_mode", RELATIVE_GELLO_MODE)
+    arm_command.setdefault("direction", list(DEFAULT_GELLO_DIRECTION))
+    arm_command.setdefault("requires_pre_activation_neutral_sample", True)
+    arm_command.setdefault("activation_sync_duration_s", 1.0)
+    arm_command.setdefault("activation_sync_maximum_drift_rad", 0.05)
+    arm_command.setdefault(
+        "stale_input_behavior",
+        "controller zeroes torque and stops when the GELLO stream becomes stale",
+    )
+    validate_arm_command_interface(arm_command)
     vision = data["vision"]
     width, height = int(vision["width"]), int(vision["height"])
     if (width, height) != (640, 480):
@@ -148,8 +216,6 @@ def load_cycle_config(path: Path) -> dict[str, Any]:
     spine_target = float(data["spine"]["initial_target_m"])
     if not math.isfinite(spine_target) or not 0.0 <= spine_target <= 0.8:
         raise ValueError("spine.initial_target_m must be within the official 0.0-0.8 m range")
-    if data["arm_command_interface"].get("message_type") != "sensor_msgs/msg/JointState":
-        raise ValueError("arm command interface must be sensor_msgs/msg/JointState")
     if set(data["objects"]) != set(OBJECTS):
         raise ValueError("objects must contain exactly cup, bowl, and plate")
     for object_name in OBJECTS:
@@ -180,6 +246,7 @@ def validate_cycle_venue_consistency(config: dict[str, Any], venue: dict[str, An
         for name, topic in expected.items() if config["topics"].get(name) != topic
     ]
     profile_gripper = venue["interface_profile"]["gripper"]
+    profile_arm = venue["interface_profile"]["arm_command"]
     if profile_gripper["message_type"] != "std_msgs/msg/Float32" or profile_gripper["field"] != "data":
         mismatches.append(
             "native grasp execution currently requires std_msgs/msg/Float32 field data for the gripper"
@@ -205,6 +272,16 @@ def validate_cycle_venue_consistency(config: dict[str, Any], venue: dict[str, An
             mismatches.append(
                 f"gripper.{field}={config['gripper'][field]!r}, interface_profile={profile_gripper[field]!r}"
             )
+    configured_arm = config["arm_command_interface"]
+    if configured_arm["control_mode"] != profile_arm["semantics"]:
+        mismatches.append(
+            f"arm command semantics={configured_arm['control_mode']!r}, "
+            f"interface_profile={profile_arm['semantics']!r}"
+        )
+    if [float(value) for value in configured_arm["direction"]] != [
+        float(value) for value in profile_arm["direction"]
+    ]:
+        mismatches.append("arm command direction differs from the Hamburg interface profile")
     if mismatches:
         raise ValueError("grasp/venue interface mismatch: " + "; ".join(mismatches))
 
@@ -242,6 +319,18 @@ def resolve_cycle_venue_overrides(config: dict[str, Any], venue: dict[str, Any])
             ("motion", "following_error_recovery_timeout_s"),
             profile["arm_motion"]["following_error_recovery_timeout_s"],
         ),
+        "TMR_HAMBURG_ARM_COMMAND_SEMANTICS": (
+            ("arm_command_interface", "control_mode"),
+            profile["arm_command"]["semantics"],
+        ),
+        "TMR_HAMBURG_ARM_ACTIVATION_SYNC_DURATION_S": (
+            ("arm_command_interface", "activation_sync_duration_s"),
+            profile["arm_command"]["activation_sync_duration_s"],
+        ),
+        "TMR_HAMBURG_ARM_ACTIVATION_SYNC_MAXIMUM_DRIFT_RAD": (
+            ("arm_command_interface", "activation_sync_maximum_drift_rad"),
+            profile["arm_command"]["activation_sync_maximum_drift_rad"],
+        ),
     }
     for environment_name, (path, value) in mappings.items():
         if environment_name not in applied:
@@ -251,6 +340,7 @@ def resolve_cycle_venue_overrides(config: dict[str, Any], venue: dict[str, Any])
     if changes:
         resolved["applied_venue_overrides"] = changes
     validate_motion_config(resolved["motion"])
+    validate_arm_command_interface(resolved["arm_command_interface"])
     validate_cycle_venue_consistency(resolved, venue)
     return resolved
 
@@ -278,6 +368,7 @@ def plan_report(config: dict[str, Any], object_name: str, descent_override: floa
         "object": object_name,
         "command_interface": config["arm_command_interface"],
         "phases": [
+            "publish measured joints as neutral GELLO inputs before controller activation",
             "native spine MoveAbsolute to pickup height",
             "right arm to parking and left arm to Shanghai pickup-top reference",
             "empty-close gripper feedback baseline, then reopen",
@@ -318,6 +409,21 @@ class NativeArmGraspCycle:
         self.images: deque[tuple[int, Any]] = deque(maxlen=20)
         self.image_at = 0.0
         self.commanded: dict[str, list[float] | None] = {"left": None, "right": None}
+        self.robot_activation_reference: dict[str, list[float] | None] = {
+            "left": None, "right": None
+        }
+        self.input_activation_reference: dict[str, list[float] | None] = {
+            "left": None, "right": None
+        }
+        self.last_published_arm_input: dict[str, list[float] | None] = {
+            "left": None, "right": None
+        }
+        self.last_arm_publish_at = 0.0
+        self.arm_publish_count = 0
+        self.arm_command_sync: dict[str, Any] | None = None
+        self.neutral_stream_started_at = 0.0
+        self.neutral_initial_pose: dict[str, list[float]] | None = None
+        self.neutral_peak_drift = {"left": 0.0, "right": 0.0}
         self.following_lag_events: deque[dict[str, Any]] = deque(maxlen=30)
         self.last_report: dict[str, Any] = {}
         topics = config["topics"]
@@ -379,7 +485,13 @@ class NativeArmGraspCycle:
     def wait_live(self, timeout_s: float) -> None:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            self.spin_for(0.05, publish_hold=False)
+            self.spin_for(
+                0.05,
+                publish_hold=bool(getattr(self, "neutral_stream_started_at", 0.0)),
+            )
+            if all(self.states.values()):
+                self._start_neutral_arm_stream()
+                self._check_neutral_arm_stream()
             if all(self.states.values()) and self.gripper_samples and self.images:
                 break
         missing = []
@@ -399,7 +511,8 @@ class NativeArmGraspCycle:
             raise RuntimeError(
                 f"left wrist image is unusable before motion: {type(exc).__name__}: {exc}"
             ) from exc
-        self.commanded = {arm: list(self.states[arm] or []) for arm in ("left", "right")}
+        self._start_neutral_arm_stream()
+        self._check_neutral_arm_stream()
 
     def diagnostic_snapshot(self) -> dict[str, Any]:
         """Return bounded live-state context suitable for a failure report."""
@@ -411,6 +524,16 @@ class NativeArmGraspCycle:
             },
             "measured_joints": self.states,
             "commanded_joints": self.commanded,
+            "arm_command_mode": self.config["arm_command_interface"]["control_mode"],
+            "robot_activation_reference": self.robot_activation_reference,
+            "input_activation_reference": self.input_activation_reference,
+            "last_published_arm_input": self.last_published_arm_input,
+            "last_arm_publish_age_s": (
+                round(now - self.last_arm_publish_at, 3)
+                if self.last_arm_publish_at > 0.0 else None
+            ),
+            "arm_publish_count": self.arm_publish_count,
+            "arm_command_sync": self.arm_command_sync,
             "gripper_sample_count": len(self.gripper_samples),
             "latest_gripper_feedback": (
                 self.gripper_samples[-1][1] if self.gripper_samples else None
@@ -472,13 +595,13 @@ class NativeArmGraspCycle:
                 report["report_warnings"].append(warning)
             print(warning, file=sys.stderr, flush=True)
 
-    def assert_controller_graph(self) -> dict[str, int]:
+    def assert_controller_graph(self, *, require_subscribers: bool = True) -> dict[str, int]:
         topics = self.config["topics"]
         counts: dict[str, int] = {}
         for key in ("left_joint_target", "right_joint_target", "left_gripper_target"):
             count = len(self.node.get_subscriptions_info_by_topic(topics[key]))
             counts[key] = count
-            if count < 1:
+            if require_subscribers and count < 1:
                 raise RuntimeError(f"no controller subscribes to {topics[key]}")
             external = [
                 info for info in self.node.get_publishers_info_by_topic(topics[key])
@@ -490,16 +613,114 @@ class NativeArmGraspCycle:
         return counts
 
     def publish_arm_holds(self) -> None:
+        published_any = False
         for arm in ("left", "right"):
             values = self.commanded[arm]
             if values is None:
                 continue
+            mode = self.config["arm_command_interface"]["control_mode"]
+            if mode == RELATIVE_GELLO_MODE:
+                robot_zero = self.robot_activation_reference[arm]
+                input_zero = self.input_activation_reference[arm]
+                if robot_zero is None or input_zero is None:
+                    continue
+                published = encode_arm_command(
+                    values,
+                    robot_zero,
+                    input_zero,
+                    self.config["arm_command_interface"]["direction"],
+                )
+            else:
+                published = list(values)
             message = self.JointState()
             message.header.stamp = self.node.get_clock().now().to_msg()
-            message.header.frame_id = "tmr_hamburg_autonomous_joint_target"
+            message.header.frame_id = "tmr_hamburg_autonomous_gello_input"
             message.name = list(self.config["joint_names"][arm])
-            message.position = list(values)
+            message.position = published
             self.arm_publishers[arm].publish(message)
+            self.last_published_arm_input[arm] = list(published)
+            published_any = True
+        if published_any:
+            self.last_arm_publish_at = time.monotonic()
+            self.arm_publish_count += 1
+
+    def _start_neutral_arm_stream(self) -> None:
+        """Start the pre-activation neutral stream at the first complete arm sample."""
+        if getattr(self, "neutral_stream_started_at", 0.0) > 0.0:
+            return
+        initial = {arm: list(self.states[arm] or []) for arm in ("left", "right")}
+        if any(len(values) != 7 for values in initial.values()):
+            raise RuntimeError("cannot start neutral arm stream without both measured poses")
+        self.neutral_initial_pose = initial
+        self.neutral_peak_drift = {"left": 0.0, "right": 0.0}
+        self.commanded = {arm: list(values) for arm, values in initial.items()}
+        self.input_activation_reference = {
+            arm: list(values) for arm, values in initial.items()
+        }
+        self.robot_activation_reference = {
+            arm: list(values) for arm, values in initial.items()
+        }
+        self.neutral_stream_started_at = time.monotonic()
+        self.publish_arm_holds()
+
+    def _check_neutral_arm_stream(self) -> None:
+        initial = getattr(self, "neutral_initial_pose", None)
+        if initial is None:
+            raise RuntimeError("neutral arm stream has not been started")
+        now = time.monotonic()
+        maximum_drift = float(
+            self.config["arm_command_interface"]["activation_sync_maximum_drift_rad"]
+        )
+        for arm in ("left", "right"):
+            if now - self.state_times[arm] > 0.5:
+                raise RuntimeError(
+                    f"{arm} joint feedback became stale during neutral activation sync"
+                )
+            measured = self.states[arm]
+            assert measured is not None
+            drift = max(abs(a - b) for a, b in zip(measured, initial[arm]))
+            self.neutral_peak_drift[arm] = max(self.neutral_peak_drift[arm], drift)
+            if drift > maximum_drift:
+                raise RuntimeError(
+                    f"{arm} moved {drift:.4f} rad during neutral GELLO activation sync; "
+                    "start this entrypoint with the joint-impedance controller inactive "
+                    "so it captures the neutral samples before following"
+                )
+
+    def synchronize_arm_command_interface(self) -> dict[str, Any]:
+        """Publish a neutral input before motion and establish activation references.
+
+        Hamburg's deployed controller captures both the robot and GELLO samples
+        when it activates.  Broadcasting the current measured pose first makes
+        that input neutral.  A fixed input is then maintained while the spine
+        and other setup operations run, so activation may safely happen at any
+        point before the first arm trajectory.
+        """
+        interface = self.config["arm_command_interface"]
+        self._start_neutral_arm_stream()
+        duration = float(interface["activation_sync_duration_s"])
+        started = self.neutral_stream_started_at
+        while time.monotonic() - started < duration:
+            remaining = duration - (time.monotonic() - started)
+            self.spin_for(min(0.05, max(0.0, remaining)))
+            self._check_neutral_arm_stream()
+        self._check_neutral_arm_stream()
+        self.publish_arm_holds()
+        report = {
+            "status": "neutral_stream_established",
+            "control_mode": interface["control_mode"],
+            "direction": list(interface["direction"]),
+            "duration_s": round(time.monotonic() - started, 3),
+            "input_at_activation": self.input_activation_reference,
+            "robot_at_activation": self.robot_activation_reference,
+            "peak_drift_rad": {
+                arm: round(value, 5) for arm, value in self.neutral_peak_drift.items()
+            },
+            "continuous_stream_required": True,
+        }
+        self.arm_command_sync = report
+        print(json.dumps({"event": "arm_command_sync", **report}), file=sys.stderr, flush=True)
+        return report
 
     def _check_following(self, arm: str) -> float:
         measured = self.states[arm]
@@ -735,6 +956,7 @@ class NativeArmGraspCycle:
             "single_ros_node_during_motion": True,
             "parameter_profile": self.config["profile_name"],
             "parameter_scope": self.config["parameter_scope"],
+            "arm_command_interface": self.config["arm_command_interface"],
             "applied_venue_overrides": self.config.get("applied_venue_overrides", {}),
             "arm_motion": {
                 key: self.config["motion"][key] for key in (
@@ -748,9 +970,16 @@ class NativeArmGraspCycle:
             "visual_alignment": [],
         }
         self.last_report = report
+        self.set_phase(report, "preactivation_command_owner_check")
+        report["preactivation_controller_graph"] = self.assert_controller_graph(
+            require_subscribers=False
+        )
         self.set_phase(report, "wait_for_live_interfaces")
         self.wait_live(10.0)
+        self.set_phase(report, "neutral_arm_command_activation_sync")
+        report["arm_command_sync"] = self.synchronize_arm_command_interface()
         report["controller_subscriber_counts"] = self.assert_controller_graph()
+        report["phases_completed"].append("neutral_arm_command_stream_ready")
         self.set_phase(report, "spine_to_pickup_height")
         report["motion_commanded"] = True
         report["spine"] = spine.move_absolute(float(self.config["spine"]["initial_target_m"]))
@@ -951,7 +1180,11 @@ def main() -> int:
         rclpy_started = True
         node = Node("tmr_task3_hamburg_autonomous_grasp")
         runner = NativeArmGraspCycle(node, venue, config, args.output_dir)
-        spine = SpineControl(node, venue["interface_profile"]["spine"])
+        spine = SpineControl(
+            node,
+            venue["interface_profile"]["spine"],
+            heartbeat=runner.publish_arm_holds,
+        )
         report = runner.run(args.object, descent, spine)
     except KeyboardInterrupt:
         report = dict(runner.last_report) if runner is not None else {}

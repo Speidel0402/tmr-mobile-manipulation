@@ -362,6 +362,12 @@ def ros_graph_report(
                 "controller_subscriber_count": subscriber_count,
                 "message_field": spec.get("message_field"),
                 "command_values": spec.get("command_values"),
+                "control_semantics": spec.get("control_semantics"),
+                "direction": spec.get("direction"),
+                "requires_pre_activation_neutral_sample": spec.get(
+                    "requires_pre_activation_neutral_sample"
+                ),
+                "stale_input_behavior": spec.get("stale_input_behavior"),
             }
             command_results.append(item)
             if spec["required"] and not found_types:

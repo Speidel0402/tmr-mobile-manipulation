@@ -32,6 +32,15 @@
     "position_service": "/franka_spine_node/get_position",
     "position_service_type": "franka_spine_msgs/srv/GetPosition"
   },
+  "arm_command": {
+    "semantics": "relative_direction_mapped_gello",
+    "direction": [-1, -1, 1, 1, 1, 1, -1],
+    "requires_pre_activation_neutral_sample": true,
+    "activation_sync_duration_s": 1.0,
+    "activation_sync_maximum_drift_rad": 0.05,
+    "stale_input_behavior": "controller zeroes torque and stops when the GELLO stream becomes stale",
+    "provenance": "Hamburg trial 2 confirmed that /{left,right}/gello/joint_states is interpreted relative to robot and GELLO samples captured at controller activation, with joints 1, 2 and 7 direction-reversed."
+  },
   "arm_motion": {
     "posture_joint_velocity_rad_s": 0.06,
     "maximum_following_error_rad": 0.24,
@@ -59,6 +68,9 @@
     "TMR_HAMBURG_ARM_FOLLOWING_ERROR_PAUSE_RAD": "arm_motion.following_error_pause_rad",
     "TMR_HAMBURG_ARM_FOLLOWING_ERROR_RESUME_RAD": "arm_motion.following_error_resume_rad",
     "TMR_HAMBURG_ARM_FOLLOWING_ERROR_RECOVERY_TIMEOUT_S": "arm_motion.following_error_recovery_timeout_s",
+    "TMR_HAMBURG_ARM_COMMAND_SEMANTICS": "arm_command.semantics",
+    "TMR_HAMBURG_ARM_ACTIVATION_SYNC_DURATION_S": "arm_command.activation_sync_duration_s",
+    "TMR_HAMBURG_ARM_ACTIVATION_SYNC_MAXIMUM_DRIFT_RAD": "arm_command.activation_sync_maximum_drift_rad",
     "TMR_HAMBURG_HEAD_CAMERA_WIDTH": "head_camera.width",
     "TMR_HAMBURG_HEAD_CAMERA_HEIGHT": "head_camera.height"
   },

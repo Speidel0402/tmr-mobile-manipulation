@@ -6,7 +6,7 @@ companion and no documented MoveIt/PTP path.
 
 | Component | Hamburg path |
 | --- | --- |
-| Arm | autonomous JointState targets on the organizer-confirmed arm controller inputs; no GELLO leader |
+| Arm | absolute robot targets encoded for the organizer-confirmed relative, direction-mapped JointState inputs; no GELLO leader |
 | Gripper | Float32 width command plus joint-state contact/retention evidence |
 | Spine | native MoveAbsolute action plus GetPosition verification |
 | Base | direct swerve Odometry and TwistStamped |
@@ -14,7 +14,9 @@ companion and no documented MoveIt/PTP path.
 | Runtime | one node; no SSH, child phase processes, MoveIt/PTP, or relay topics |
 
 The deployed arm topics retain “gello” in their names, but the Hamburg scripts
-do not use a leader device. A physical GELLO publisher must be stopped before
+do not use a leader device. They publish a measured-joint neutral stream before
+controller activation, then encode autonomous targets against the captured
+activation references. A physical GELLO publisher must be stopped before
 autonomous execution so there is one command owner.
 
 The organizer glue is unnecessary for the new path. Odometry/state relays are

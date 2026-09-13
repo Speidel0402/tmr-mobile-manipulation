@@ -33,6 +33,17 @@ def load_interface_profile(
     environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     profile = json.loads(path.read_text(encoding="utf-8"))
+    profile.setdefault("arm_command", {
+        "semantics": "relative_direction_mapped_gello",
+        "direction": [-1, -1, 1, 1, 1, 1, -1],
+        "requires_pre_activation_neutral_sample": True,
+        "activation_sync_duration_s": 1.0,
+        "activation_sync_maximum_drift_rad": 0.05,
+        "stale_input_behavior": (
+            "controller zeroes torque and stops when the GELLO stream becomes stale"
+        ),
+        "provenance": "Hamburg organizer-confirmed relative GELLO controller semantics",
+    })
     environ = os.environ if environment is None else environment
     applied = {}
     for name, dotted_path in profile.get("environment_overrides", {}).items():
@@ -47,6 +58,7 @@ def load_interface_profile(
 def validate_interface_profile(profile: dict[str, Any]) -> None:
     gripper = profile["gripper"]
     spine = profile["spine"]
+    arm_command = profile["arm_command"]
     for label, section in (("gripper", gripper),):
         if "/msg/" not in str(section["message_type"]):
             raise ValueError(f"{label}.message_type must be a ROS message type")
@@ -97,6 +109,31 @@ def validate_interface_profile(profile: dict[str, Any]) -> None:
         raise ValueError(
             "arm_motion following-error limits must satisfy resume < pause < maximum <= 0.35"
         )
+    semantics = str(arm_command["semantics"])
+    if semantics not in {
+        "relative_direction_mapped_gello", "absolute_robot_joint_positions"
+    }:
+        raise ValueError(f"unsupported arm_command semantics {semantics!r}")
+    if semantics == "relative_direction_mapped_gello" and arm_command.get(
+        "requires_pre_activation_neutral_sample"
+    ) is not True:
+        raise ValueError(
+            "relative GELLO semantics require a pre-activation neutral sample"
+        )
+    direction = arm_command["direction"]
+    if (
+        not isinstance(direction, list) or len(direction) != 7
+        or any(float(value) not in {-1.0, 1.0} for value in direction)
+    ):
+        raise ValueError("arm_command.direction must contain seven values equal to -1 or 1")
+    for field in ("activation_sync_duration_s", "activation_sync_maximum_drift_rad"):
+        value = float(arm_command[field])
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"arm_command.{field} must be positive and finite")
+    if float(arm_command["activation_sync_duration_s"]) > 10.0:
+        raise ValueError("arm_command.activation_sync_duration_s must not exceed 10 s")
+    if float(arm_command["activation_sync_maximum_drift_rad"]) > 0.20:
+        raise ValueError("arm_command.activation_sync_maximum_drift_rad must not exceed 0.20 rad")
 
 
 def apply_interface_profile(
@@ -106,6 +143,16 @@ def apply_interface_profile(
     commands = {item["name"]: item for item in resolved["command_endpoints"]}
     gripper = profile["gripper"]
     spine = profile["spine"]
+    arm_command = profile["arm_command"]
+    for name in ("left_arm_joint_target", "right_arm_joint_target"):
+        commands[name].update({
+            "control_semantics": arm_command["semantics"],
+            "direction": list(arm_command["direction"]),
+            "requires_pre_activation_neutral_sample": bool(
+                arm_command["requires_pre_activation_neutral_sample"]
+            ),
+            "stale_input_behavior": arm_command["stale_input_behavior"],
+        })
     for name, topic in (
         ("left_gripper_target", gripper["left_topic"]),
         ("right_gripper_target", gripper["right_topic"]),

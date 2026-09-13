@@ -31,7 +31,7 @@ every standalone grasp, and the full mission.
 | Component | Hamburg path used by these entrypoints |
 | --- | --- |
 | Arm state | `/{left,right}/franka_robot_state_broadcaster/measured_joint_states` |
-| Arm command | `/{left,right}/gello/joint_states`, `sensor_msgs/JointState` |
+| Arm command | `/{left,right}/gello/joint_states`, relative activation-referenced `sensor_msgs/JointState`, direction `[-1,-1,1,1,1,1,-1]` |
 | Gripper | native Float32 width target, `0.8=open`, `0.0=closed`, plus gripper joint feedback |
 | Spine | `/franka_spine_node/move_absolute` and `/franka_spine_node/get_position` |
 | Base | direct `/swerve_drive_controller/odom` and `/swerve_drive_controller/cmd_vel` |
@@ -39,12 +39,27 @@ every standalone grasp, and the full mission.
 | Head RGB | raw 640×360 ZED; letter recognition and centering in the full mission |
 | Range | front and rear native LaserScan streams |
 
-The arm command topics contain `gello` in the deployed controller's names. The
-new code does not use a GELLO leader or manual teleoperation. It computes
-autonomous FR3v2 targets and continuously streams them to the organizer-confirmed
-joint-impedance controller input. The official FR3v2 kinematic chain and joint
-limits are applied locally, so the Hamburg path does not depend on MoveIt, PTP,
-IK/FK services, or Robotiq actions.
+The arm command topics contain `gello` because Hamburg's deployed
+joint-impedance controller implements the GELLO teleoperation convention. The
+input is not an absolute robot target. At controller activation it captures a
+robot reference and an input reference, then applies directions
+`[-1,-1,1,1,1,1,-1]`. The Hamburg runner therefore keeps every trajectory,
+joint-limit check and following-error check in absolute robot coordinates, and
+encodes only the outgoing message as
+`input_zero + direction * (robot_target - robot_zero)`.
+
+No physical GELLO leader or manual teleoperation is used. Before any requested
+arm motion, the runner continuously publishes the current measured joints as a
+neutral input. Start the physical entrypoint with the arm controllers inactive
+or ready to activate so they capture that neutral sample. The same input is
+kept alive while the spine action, cameras, gripper and base loops run; Hamburg
+reports that a stale GELLO stream zeroes torque and stops the controller. If an
+arm moves during neutral synchronization, the run stops before the parking
+trajectory and reports that the controller must be reactivated with the neutral
+stream present.
+
+The official FR3v2 kinematic chain and joint limits are applied locally, so the
+Hamburg path does not depend on MoveIt, PTP, IK/FK services, or Robotiq actions.
 
 Each physical entrypoint creates one ROS node and
 constructs all subscriptions, publishers, action clients, and service clients

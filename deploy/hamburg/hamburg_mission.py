@@ -284,6 +284,7 @@ def plan_report(mission: dict[str, Any], grasp: dict[str, Any]) -> dict[str, Any
             "arm": grasp["arm_command_interface"],
         },
         "sequence": [
+            "Neutral direction-mapped GELLO activation sync and continuous arm keepalive",
             "Shanghai-reference outbound stages, each independently overrideable",
             "cup observation-pick-lift -> B search-place -> measured return",
             "bowl observation-pick-lift -> A search-place -> measured return",
@@ -871,6 +872,7 @@ class HamburgMission:
             "schema_version": 1, "status": "running", "motion_commanded": False,
             "single_ros_node_during_motion": True, "assignment": self.mission["assignment"],
             "route_profile_warning": self.mission["profile_warning"],
+            "arm_command_interface": self.grasp["arm_command_interface"],
             "applied_venue_overrides": {
                 "mission": self.mission.get("applied_venue_overrides", {}),
                 "grasp": self.grasp.get("applied_venue_overrides", {}),
@@ -878,9 +880,15 @@ class HamburgMission:
             "hamburg_measurements": self.mission["hamburg_measurements"], "objects": {},
         }
         self.report = report
+        self.checkpoint("preactivation_command_owner_check")
+        report["preactivation_controller_graph"] = self.arm.assert_controller_graph(
+            require_subscribers=False
+        )
         self.checkpoint("wait_for_native_interfaces")
         self.arm.wait_live(10.0)
-        self.arm.assert_controller_graph()
+        self.checkpoint("neutral_arm_command_activation_sync")
+        report["arm_command_sync"] = self.arm.synchronize_arm_command_interface()
+        report["controller_subscriber_counts"] = self.arm.assert_controller_graph()
         self.base.wait_ready()
         self.checkpoint("initialize_spine_and_arms")
         report["motion_commanded"] = True
@@ -995,7 +1003,11 @@ def main() -> int:
         node = Node("tmr_task3_hamburg_single_node_mission")
         arm = NativeArmGraspCycle(node, venue, grasp, args.output_dir)
         base = NativeBaseControl(node, arm, mission)
-        spine = SpineControl(node, venue["interface_profile"]["spine"])
+        spine = SpineControl(
+            node,
+            venue["interface_profile"]["spine"],
+            heartbeat=arm.publish_arm_holds,
+        )
         mission_runner = HamburgMission(arm, base, spine, mission, grasp, args.output_dir)
         report = mission_runner.run()
     except KeyboardInterrupt:

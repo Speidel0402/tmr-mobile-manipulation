@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 from hamburg_grasp_cycle import (
     NativeArmGraspCycle,
     alignment_delta_m,
+    encode_arm_command,
     load_cycle_config,
     plan_report as grasp_plan,
     resolve_cycle_venue_overrides,
@@ -96,6 +97,125 @@ class HamburgMotionTests(unittest.TestCase):
             self.grasp["motion"]["posture_joint_velocity_rad_s"],
         )
 
+    def test_absolute_targets_are_encoded_for_hamburg_relative_gello(self) -> None:
+        robot_zero = [0.81, -0.20, 0.30, -1.80, 0.40, 1.20, -0.60]
+        input_zero = list(robot_zero)
+        target = [0.61, -0.35, 0.45, -1.60, 0.25, 1.10, -0.80]
+        direction = [-1, -1, 1, 1, 1, 1, -1]
+        encoded = encode_arm_command(target, robot_zero, input_zero, direction)
+        expected = [
+            input_zero[i] + direction[i] * (target[i] - robot_zero[i])
+            for i in range(7)
+        ]
+        np.testing.assert_allclose(encoded, expected)
+        decoded = [
+            robot_zero[i] + direction[i] * (encoded[i] - input_zero[i])
+            for i in range(7)
+        ]
+        np.testing.assert_allclose(decoded, target)
+
+    def test_arm_publisher_keeps_robot_targets_absolute_internally(self) -> None:
+        class JointState:
+            def __init__(self):
+                self.header = mock.Mock()
+                self.name = []
+                self.position = []
+
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = self.grasp
+        runner.JointState = JointState
+        runner.node = mock.Mock()
+        runner.node.get_clock.return_value.now.return_value.to_msg.return_value = object()
+        runner.arm_publishers = {"left": mock.Mock(), "right": mock.Mock()}
+        runner.robot_activation_reference = {
+            "left": [0.0] * 7, "right": [0.1] * 7
+        }
+        runner.input_activation_reference = {
+            "left": [0.0] * 7, "right": [0.1] * 7
+        }
+        runner.commanded = {
+            "left": [0.2, -0.2, 0.2, -0.2, 0.2, -0.2, 0.2],
+            "right": [0.2] * 7,
+        }
+        runner.last_published_arm_input = {"left": None, "right": None}
+        runner.last_arm_publish_at = 0.0
+        runner.arm_publish_count = 0
+        runner.publish_arm_holds()
+        left_message = runner.arm_publishers["left"].publish.call_args.args[0]
+        np.testing.assert_allclose(
+            left_message.position,
+            [-0.2, 0.2, 0.2, -0.2, 0.2, -0.2, -0.2],
+        )
+        self.assertEqual(runner.commanded["left"][0], 0.2)
+        self.assertEqual(runner.arm_publish_count, 1)
+
+    def test_wait_live_starts_neutral_stream_before_other_inputs_arrive(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.states = {"left": None, "right": None}
+        runner.state_times = {"left": 0.0, "right": 0.0}
+        runner.gripper_samples = deque(maxlen=10)
+        runner.images = deque(maxlen=10)
+        runner.commanded = {"left": None, "right": None}
+        runner.robot_activation_reference = {"left": None, "right": None}
+        runner.input_activation_reference = {"left": None, "right": None}
+        runner.neutral_stream_started_at = 0.0
+        runner.neutral_initial_pose = None
+        runner.neutral_peak_drift = {"left": 0.0, "right": 0.0}
+        runner.publish_arm_holds = mock.Mock()
+        publish_hold_arguments = []
+
+        def spin(_duration, *, publish_hold=True):
+            publish_hold_arguments.append(publish_hold)
+            now = time.monotonic()
+            runner.states = {"left": [0.1] * 7, "right": [0.2] * 7}
+            runner.state_times = {"left": now, "right": now}
+            if len(publish_hold_arguments) == 2:
+                runner.gripper_samples.append((now, [0.04, 0.04]))
+                runner.images.append((1, object()))
+
+        runner.spin_for = spin
+        with mock.patch("hamburg_grasp_cycle.decode_wrist_rgb", return_value=object()):
+            runner.wait_live(0.5)
+
+        self.assertEqual(publish_hold_arguments[:2], [False, True])
+        self.assertGreater(runner.neutral_stream_started_at, 0.0)
+        self.assertEqual(runner.input_activation_reference["right"], [0.2] * 7)
+        runner.publish_arm_holds.assert_called_once()
+
+    def test_neutral_activation_sync_precedes_motion_and_rejects_drift(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.config["arm_command_interface"]["activation_sync_duration_s"] = 0.002
+        runner.states = {"left": [0.1] * 7, "right": [0.2] * 7}
+        runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+        runner.publish_arm_holds = mock.Mock()
+
+        def neutral_spin(duration):
+            runner.publish_arm_holds()
+            runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+            time.sleep(duration)
+
+        runner.spin_for = neutral_spin
+        report = runner.synchronize_arm_command_interface()
+        self.assertEqual(report["status"], "neutral_stream_established")
+        self.assertEqual(report["direction"], [-1, -1, 1, 1, 1, 1, -1])
+        self.assertEqual(report["input_at_activation"]["right"], [0.2] * 7)
+        self.assertGreaterEqual(runner.publish_arm_holds.call_count, 2)
+
+        runner.config["arm_command_interface"]["activation_sync_duration_s"] = 0.01
+        runner.config["arm_command_interface"]["activation_sync_maximum_drift_rad"] = 0.01
+        runner.states = {"left": [0.1] * 7, "right": [0.2] * 7}
+        runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+
+        def drifting_spin(_duration):
+            runner.states["right"][0] += 0.02
+            runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+
+        runner.spin_for = drifting_spin
+        with self.assertRaisesRegex(RuntimeError, "controller inactive"):
+            runner.synchronize_arm_command_interface()
+
     def test_previous_grasp_config_gains_safe_lag_defaults(self) -> None:
         legacy = json.loads(
             (ROOT / "config" / "grasp-cycle-shanghai-reference.json").read_text(
@@ -107,6 +227,15 @@ class HamburgMotionTests(unittest.TestCase):
             "following_error_resume_rad", "following_error_recovery_timeout_s",
         ):
             legacy["motion"].pop(key)
+        legacy["arm_command_interface"] = {
+            "description": "legacy absolute-looking description",
+            "message_type": "sensor_msgs/msg/JointState",
+            "units": "radian",
+            "control_mode": (
+                "continuous joint target consumed by the deployed "
+                "Franka joint-impedance controller"
+            ),
+        }
         legacy["motion"]["maximum_following_error_rad"] = 0.16
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy-grasp.json"
@@ -120,6 +249,14 @@ class HamburgMotionTests(unittest.TestCase):
         self.assertLess(
             loaded["motion"]["following_error_pause_rad"],
             loaded["motion"]["maximum_following_error_rad"],
+        )
+        self.assertEqual(
+            loaded["arm_command_interface"]["control_mode"],
+            "relative_direction_mapped_gello",
+        )
+        self.assertEqual(
+            loaded["arm_command_interface"]["direction"],
+            [-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0],
         )
 
     def test_transient_following_lag_holds_and_recovers(self) -> None:
@@ -224,10 +361,14 @@ class HamburgMotionTests(unittest.TestCase):
             def wait_live(self, timeout):
                 events.append(("wait_live", timeout))
 
-            def assert_controller_graph(self):
-                events.append(("controller_graph",))
+            def assert_controller_graph(self, *, require_subscribers=True):
+                events.append(("controller_graph", require_subscribers))
                 return {"left_joint_target": 1, "right_joint_target": 1,
                         "left_gripper_target": 1}
+
+            def synchronize_arm_command_interface(self):
+                events.append(("arm_sync",))
+                return {"status": "neutral_stream_established"}
 
             def move_to_joint_posture(self, arm, target):
                 events.append(("move", arm, list(target)))
@@ -256,8 +397,9 @@ class HamburgMotionTests(unittest.TestCase):
         self.assertFalse(report["base_motion_commanded"])
         self.assertEqual(report["left_wrist_frame"], {"width": 640, "height": 480})
         ordered_actions = [item[0:2] for item in events if item[0] in
-                           {"spine", "move", "gripper", "fresh_wrist"}]
+                           {"arm_sync", "spine", "move", "gripper", "fresh_wrist"}]
         self.assertEqual(ordered_actions, [
+            ("arm_sync",),
             ("spine", 0.7),
             ("move", "right"),
             ("move", "left"),
@@ -338,8 +480,11 @@ class HamburgMotionTests(unittest.TestCase):
             def wait_live(self, _timeout):
                 return None
 
-            def assert_controller_graph(self):
+            def assert_controller_graph(self, *, require_subscribers=True):
                 return {}
+
+            def synchronize_arm_command_interface(self):
+                return {"status": "neutral_stream_established"}
 
             def move_to_joint_posture(self, arm, target):
                 self.moves.append((arm, list(target)))

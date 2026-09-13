@@ -7,11 +7,17 @@ created here; a caller owns the node and its executor.
 from __future__ import annotations
 
 import math
-from typing import Any
+import time
+from typing import Any, Callable
 
 
 class SpineControl:
-    def __init__(self, node: Any, profile: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        node: Any,
+        profile: dict[str, Any],
+        heartbeat: Callable[[], None] | None = None,
+    ) -> None:
         if profile["interface"] != "action":
             raise ValueError("native Hamburg spine control requires the action profile")
         from rclpy.action import ActionClient
@@ -19,6 +25,8 @@ class SpineControl:
 
         self.node = node
         self.profile = profile
+        self.heartbeat = heartbeat
+        self.heartbeat_count = 0
         self.errors: list[str] = []
         self.action_type = get_action(profile["action_type"])
         self.service_type = get_service(profile["position_service_type"])
@@ -38,19 +46,41 @@ class SpineControl:
             "interface": self.profile["interface"],
             "action_name": self.profile["action_name"],
             "position_service": self.profile["position_service"],
+            "arm_keepalive_count": self.heartbeat_count,
             "errors": list(self.errors),
         }
+
+    def _keep_arm_stream_alive(self) -> None:
+        if self.heartbeat is not None:
+            self.heartbeat()
+            self.heartbeat_count += 1
+
+    def _wait_for_endpoint(self, waiter: Callable[..., bool], timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self._keep_arm_stream_alive()
+            if waiter(timeout_sec=min(0.02, max(0.0, deadline - time.monotonic()))):
+                return True
+        return False
 
     def _wait(self, future: Any, timeout_s: float) -> Any:
         import rclpy
 
-        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout_s)
+        deadline = time.monotonic() + timeout_s
+        while not future.done() and time.monotonic() < deadline:
+            self._keep_arm_stream_alive()
+            rclpy.spin_until_future_complete(
+                self.node,
+                future,
+                timeout_sec=min(0.02, max(0.0, deadline - time.monotonic())),
+            )
+        self._keep_arm_stream_alive()
         if not future.done() or future.result() is None:
             raise TimeoutError("native spine response timed out")
         return future.result()
 
     def position(self, timeout_s: float = 5.0) -> float:
-        if not self.position_client.wait_for_service(timeout_sec=timeout_s):
+        if not self._wait_for_endpoint(self.position_client.wait_for_service, timeout_s):
             raise RuntimeError("native spine position service unavailable")
         response = self._wait(
             self.position_client.call_async(self.service_type.Request()), timeout_s
@@ -81,7 +111,7 @@ class SpineControl:
         if abs(start_m - target_m) <= tolerance_m:
             return {"moved": False, "start_position_m": start_m,
                     "target_position_m": target_m, "measured_position_m": start_m}
-        if not self.action_client.wait_for_server(timeout_sec=5.0):
+        if not self._wait_for_endpoint(self.action_client.wait_for_server, 5.0):
             raise RuntimeError("native spine action unavailable")
         goal = self.action_type.Goal()
         goal.position = target_m

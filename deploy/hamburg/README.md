@@ -53,6 +53,12 @@ can be changed using `TMR_HAMBURG_HEAD_CAMERA_WIDTH` and
 `TMR_HAMBURG_HEAD_CAMERA_HEIGHT`; this changes validation only, not the
 Shanghai camera calibration or mission processing.
 
+Shanghai letter search uses image-normalized card centres and width-scaled
+candidate sizes, so a pure 2x resize does not require manually moving its
+drawn card centres. The Hamburg raw-image topic still needs a new mission
+consumer, and detection quality must be checked on real downscaled frames.
+See `INTEGRATION_AUDIT.md` for the coordinate audit.
+
 The spine command interface is selectable with
 `TMR_HAMBURG_SPINE_INTERFACE=action|topic`. `action` is the Hamburg default.
 The topic option is retained for a different venue that actually subscribes to

@@ -82,6 +82,24 @@ class LetterVisionContracts(unittest.TestCase):
         found = vision.LetterCardRecognizer("ABD", minimum_confidence=0.20).detect(image)
         self.assertEqual({item.letter for item in found}, {"A", "B", "D"})
 
+    def test_letter_centres_survive_twofold_head_image_downscale(self) -> None:
+        native = np.full((720, 1280, 3), (55, 70, 85), np.uint8)
+        for letter, x, y in (("A", 150, 470), ("B", 560, 460), ("D", 930, 170)):
+            cv2.rectangle(native, (x, y), (x + 90, y + 130), (245, 245, 245), -1)
+            cv2.putText(native, letter, (x + 10, y + 100), cv2.FONT_HERSHEY_SIMPLEX,
+                        2.3, (70, 70, 70), 4, cv2.LINE_AA)
+        reduced = cv2.resize(native, (640, 360), interpolation=cv2.INTER_AREA)
+        recognizer = vision.LetterCardRecognizer("ABD", minimum_confidence=0.20)
+        native_by_letter = {item.letter: item for item in recognizer.detect(native)}
+        reduced_by_letter = {item.letter: item for item in recognizer.detect(reduced)}
+        self.assertEqual(set(native_by_letter), {"A", "B", "D"})
+        self.assertEqual(set(reduced_by_letter), set(native_by_letter))
+        for letter in native_by_letter:
+            before, after = native_by_letter[letter], reduced_by_letter[letter]
+            self.assertEqual(before.row, after.row)
+            self.assertAlmostEqual(before.center_x_norm, after.center_x_norm, delta=0.005)
+            self.assertAlmostEqual(before.center_y_norm, after.center_y_norm, delta=0.005)
+
     def test_two_holes_alone_do_not_authorize_a_false_b(self) -> None:
         card = np.full((192, 192, 3), 245, np.uint8)
         cv2.circle(card, (96, 62), 30, (20, 20, 20), 9)

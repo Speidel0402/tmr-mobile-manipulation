@@ -72,6 +72,35 @@ The [current Stereolabs wrapper configuration](https://github.com/stereolabs/zed
 documents `CUSTOM` as the publishing mode that applies the downscale factor;
 the organizer's installed wrapper version and live output remain authoritative.
 
+## Head-ZED coordinates under 2x downscaling
+
+Shanghai starts its letter-search ZED with `base/config/zed_letters_override.yaml`:
+`pub_resolution: NATIVE`, `pub_downscale_factor: 1.0`, 10 published RGB frames/s,
+and no depth. The launcher uses a separate vision DDS domain, exports a
+compressed JPEG frame atomically, and the control process detects letters from
+that file. Hamburg has so far confirmed a different *raw* `sensor_msgs/Image`
+topic. A new single-node mission must subscribe to that native topic and decode
+it accordingly; changing the expected width alone does not fix the transport.
+
+The active Shanghai letter recognizer scales candidate card area and dimensions
+with image width, normalizes each glyph to a 96x96 canvas, records card centres
+as `x/width` and `y/height`, and makes row/centering decisions in normalized
+coordinates. Its image-motion gain is learned in normalized-width per metre.
+`annotate()` draws the detected quadrilateral in the *current frame's* pixel
+coordinates. Thus a pure 1280x720 to 640x360 resize does not require manually
+halving stored letter-card centre points or annotation positions. An offline
+regression using the repository's synthetic A/B/D scene retains all three
+detections, their normalized centres, and near/far rows at both sizes.
+
+That regression does not establish venue accuracy: half-resolution loses fine
+glyph detail and changes edge/threshold noise, while Shanghai's actual camera
+mount, capture resolution and JPEG transport are not proved identical to
+Hamburg. Compare paired venue frames, confidence, false positives, and latency
+before accepting the new output. The unused `head_rgb_descent.py` path has a
+normalized gripper column, but also absolute ROI and pixel-per-metre bounds;
+its `descend_with_head_rgb()` function is not called by the current pick main.
+It would need separate scaling/calibration if enabled later.
+
 ## Acceptance still required
 
 1. Run the updated native `check` without organizer relays and record the

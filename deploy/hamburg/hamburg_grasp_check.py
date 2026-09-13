@@ -28,6 +28,11 @@ EXPECTED_JOINTS = {
     arm: [f"{arm}_fr3v2_joint{i}" for i in range(1, 8)]
     for arm in ("left", "right")
 }
+GRASP_REQUIRED_STREAMS = frozenset({
+    "left_arm_joint_state", "right_arm_joint_state",
+    "left_gripper_joint_state", "right_gripper_joint_state",
+    "left_wrist_camera",
+})
 
 
 def decode_wrist_rgb(message: Any):
@@ -137,29 +142,24 @@ def run_check(config: dict[str, Any], object_name: str, timeout_s: float) -> dic
                             "names": list(message.name), "position": list(message.position)}
         return callback
 
-    def on_image(name: str):
-        def callback(message: Any) -> None:
-            latest[name] = {"topic": streams[name]["topic"], "received_at": time.monotonic(), "width": int(message.width),
-                            "height": int(message.height), "encoding": str(message.encoding),
-                            "frame_id": str(message.header.frame_id)}
-            if name == "left_wrist_camera":
-                stamp = int(message.header.stamp.sec) * 1_000_000_000 + int(message.header.stamp.nanosec)
-                if stamp > 0 and (not frames or stamp > frames[-1][0]):
-                    frames.append((stamp, message))
-        return callback
+    def on_wrist_image(message: Any) -> None:
+        name = "left_wrist_camera"
+        latest[name] = {"topic": streams[name]["topic"], "received_at": time.monotonic(), "width": int(message.width),
+                        "height": int(message.height), "encoding": str(message.encoding),
+                        "frame_id": str(message.header.frame_id)}
+        stamp = int(message.header.stamp.sec) * 1_000_000_000 + int(message.header.stamp.nanosec)
+        if stamp > 0 and (not frames or stamp > frames[-1][0]):
+            frames.append((stamp, message))
 
     try:
         for name in ("left_arm_joint_state", "right_arm_joint_state",
                      "left_gripper_joint_state", "right_gripper_joint_state"):
             node.create_subscription(JointState, streams[name]["topic"],
                                      on_joint(name), qos_profile_sensor_data)
-        for name in ("left_wrist_camera", "head_camera"):
-            node.create_subscription(Image, streams[name]["topic"],
-                                     on_image(name), qos_profile_sensor_data)
+        node.create_subscription(Image, streams["left_wrist_camera"]["topic"],
+                                 on_wrist_image, qos_profile_sensor_data)
         deadline = started + timeout_s
-        required = {"left_arm_joint_state", "right_arm_joint_state",
-                    "left_gripper_joint_state", "right_gripper_joint_state",
-                    "left_wrist_camera", "head_camera"}
+        required = GRASP_REQUIRED_STREAMS
         while time.monotonic() < deadline and (not required.issubset(latest) or len(frames) < 5):
             rclpy.spin_once(node, timeout_sec=0.1)
 
@@ -177,13 +177,6 @@ def run_check(config: dict[str, Any], object_name: str, timeout_s: float) -> dic
                 errors.append("left wrist image size or encoding mismatch")
             if not sample["frame_id"] or any(x in sample["frame_id"].lower() for x in ("right", "zed")):
                 errors.append("left wrist image frame identity is ambiguous")
-        if "head_camera" in latest:
-            sample = latest["head_camera"]
-            head = streams["head_camera"]
-            if (sample["width"], sample["height"], sample["encoding"]) != (
-                head["expected_width"], head["expected_height"], head["expected_encoding"]
-            ):
-                errors.append("head camera does not match the configured Hamburg profile")
         subscriber_counts = {
             name: len(node.get_subscriptions_info_by_topic(commands[name]["topic"]))
             for name in ("left_arm_joint_target", "right_arm_joint_target",

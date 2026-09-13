@@ -13,12 +13,13 @@ native action name and the `MoveAbsolute` goal/result fields if they differ
 from the Shanghai package (`position`, `velocity`, `acceleration`,
 `deceleration`; result `success`, `error`, `stop_by`). The check sends no goal.
 
-After the native preflight, please run `grasp-check --object cup`, then bowl and
-plate, with each object at the normal pickup area and both arms already in the
+Please also run `grasp-check --object cup`, then bowl and plate, with each
+object at the normal pickup area and both arms already in the
 configured pickup/parking posture. This check is also read-only. It reports
 joint-position error, spine height, RGB frame identity, and stability of the
 existing object-specific detector; it does not close a gripper or certify a
-grasp. Please send all three JSON reports.
+grasp. It uses only the left wrist RGB camera, so the head ZED setting does not
+gate this standalone observation. Please send all three JSON reports.
 
 For the head camera, please publish 640×360 `bgr8` and report both image and
 `camera_info` dimensions. In the current Stereolabs ROS 2 wrapper, 2x

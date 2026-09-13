@@ -109,7 +109,8 @@ fresh left-wrist frames with stable object-specific rim detections. For example:
 
 The result explicitly records `grasp_executed: false` and
 `motion_commanded: false`; `observation_ready` means only that this static view
-was detectable. The selected object, table height, joint targets, and visual
+was detectable. It uses the 640×480 left wrist camera only and does not require
+the head ZED's 640×360 output. The selected object, table height, joint targets, and visual
 calibration still require physical acceptance. `grasp-test` refuses motion.
 The separately runnable Shanghai grasp tests in
 `../../docs/STANDALONE_GRASP_TESTS.md` still depend on Shanghai

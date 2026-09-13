@@ -14,7 +14,7 @@ The original strategy keeps cup → B, bowl → A, and plate → D. The Septembe
 | Spine | Float32 target and joint-state relay assumed by old Hamburg check | Native `MoveAbsolute` action plus `GetPosition` service in preflight; a caller-owned-node action adapter exists but is not wired into a mission |
 | Head camera | Shanghai compressed path | Hamburg raw ZED topic; require 640×360 `bgr8` with ZED `general.pub_resolution: CUSTOM` and `general.pub_downscale_factor: 2.0` |
 | Arms and grippers | MoveIt/PTP, Robotiq actions in mission scripts | Hamburg Gello `JointState` and Float32 width topics are identified; motion policy not yet ported |
-| Standalone grasps | Shanghai script initializes/moves each arm and uses action feedback to prove contact | Hamburg `grasp-check` verifies a static object-specific view without motion; physical `grasp-test` remains locked |
+| Standalone grasps | Shanghai script initializes/moves each arm and uses action feedback to prove contact | Hamburg `grasp-check` verifies a static object-specific view from the 640×480 left wrist camera without motion or head-ZED dependency; physical `grasp-test` remains locked |
 | Node lifecycle | Phase scripts repeatedly create ROS nodes | Read-only check is one node; mission remains locked until a one-node port exists |
 | Calibration | Shanghai table and grasp geometry | Preserved as an assumption; requires Hamburg physical acceptance |
 

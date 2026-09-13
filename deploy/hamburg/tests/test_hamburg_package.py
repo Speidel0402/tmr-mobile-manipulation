@@ -220,6 +220,8 @@ class HamburgPackageTests(unittest.TestCase):
 
     def test_grasp_observation_requires_fresh_stable_detections(self) -> None:
         module = self._load_module("hamburg_grasp_check")
+        self.assertIn("left_wrist_camera", module.GRASP_REQUIRED_STREAMS)
+        self.assertNotIn("head_camera", module.GRASP_REQUIRED_STREAMS)
         report, errors = module.evaluate_observations([
             (292.0, 168.0), (293.0, 168.5), (292.5, 167.5),
             (292.2, 168.1), (293.1, 167.9),

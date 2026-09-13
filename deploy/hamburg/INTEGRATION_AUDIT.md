@@ -29,7 +29,7 @@ prove motion semantics.
 | --- | --- | --- |
 | `run_hamburg.sh check` / `hamburg_preflight.py` | Native odometry plus spine action/service, one read-only node, domain inherited; blocks if the four known relay topics remain in the graph | Must be run on the actual Humble companion |
 | `spine_control.py` | Action client uses a caller-owned node; checks bounds, result and measured height | Not wired into a runnable mission; action name and `GetPosition` type need live confirmation |
-| `run_hamburg.sh grasp-check` / `hamburg_grasp_check.py` | One read-only node, raw wrist RGB and existing cup/bowl/plate detectors, posture and spine checks | Detectability is not grasp success; Shanghai pixel calibration and posture need venue acceptance |
+| `run_hamburg.sh grasp-check` / `hamburg_grasp_check.py` | One read-only node, 640x480 raw left-wrist RGB and existing cup/bowl/plate detectors, posture and spine checks; no head ZED requirement | Detectability is not grasp success; wrist-camera pixel calibration and posture need venue acceptance |
 | `run_hamburg.sh grasp-test` | Explicitly locked | No validated Gello motion planner or Float32 gripper contact proof |
 | `run_hamburg.sh mission` | Explicitly locked | No one-node port of pickup, travel, search and placement |
 | `mission/scripts/run_standalone_grasp_test.py` | Shanghai executor rejects Humble execution | It spawns phase processes and uses MoveIt/PTP, Robotiq actions and old camera snapshot path |
@@ -47,7 +47,7 @@ prove motion semantics.
 | Spine | `MoveAbsolute` + `/franka_spine_node/get_position`; 0.7 m home | Action *type* and service *name* stated by organizer; `/franka_spine_node/move_absolute`, `GetPosition` type, goal/result fields and accepted range are inferred from Shanghai source pending native check |
 | Grippers | Float32 width topics, 0.8 open / 0.0 closed | Organizer confirms endpoints/convention; old action uses the opposite numeric direction and its stall/result fields are absent from a Float32 publication |
 | Wrist RGB | `/wrist_camera_left/camera/color/image_raw`, 640x480 `rgb8` | Dimensions match Shanghai detector gates, but old HTTP snapshot validator expects `/wrist_camera_left/color/image_raw`; mount, intrinsics and visual targets remain unverified |
-| Head RGB | `/head_camera/zed_node/rgb/color/rect/image`, 640x360 `bgr8` after 2x downscale | Current ZED wrapper needs `general.pub_resolution: CUSTOM` for `general.pub_downscale_factor: 2.0` to apply; the published image and camera_info must be verified. Old mission uses a different compressed topic and pixel assumptions may change |
+| Head RGB | `/head_camera/zed_node/rgb/color/rect/image`, 640x360 `bgr8` after 2x downscale | Required by the full preflight/mission path, not standalone `grasp-check`. Current ZED wrapper needs `general.pub_resolution: CUSTOM` for `general.pub_downscale_factor: 2.0` to apply; image and camera_info must be verified. Old letter-search uses a different compressed topic and pixel assumptions may change |
 | Pickup posture | left pick-top and right parking targets copied from `grasp_initial_state.yaml` | Static tests prove source consistency; the venue has not accepted their clearance or joint-order semantics |
 | Object descent | cup 0.340 m, bowl 0.360 m, plate 0.375 m | Preserved only as review values. No Hamburg motion uses them until table geometry and arm path are verified |
 

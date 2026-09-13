@@ -18,6 +18,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements-offline-base.txt
+      - name: Install Hamburg test dependencies
+        run: python -m pip install -r requirements-offline-base.txt
       - name: Validate Hamburg deployment package
         run: |
           python -m unittest discover -s deploy/hamburg/tests -v

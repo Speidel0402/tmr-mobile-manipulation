@@ -43,6 +43,7 @@ OBJECTS = ("cup", "bowl", "plate")
 RELATIVE_GELLO_MODE = "relative_direction_mapped_gello"
 ABSOLUTE_JOINT_MODE = "absolute_robot_joint_positions"
 DEFAULT_GELLO_DIRECTION = [-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0]
+INPUT_CALLBACK_SPIN_BUDGET = 16
 
 
 def encode_arm_command(
@@ -95,7 +96,8 @@ def validate_motion_config(motion: dict[str, Any]) -> None:
         "publish_rate_hz", "maximum_joint_velocity_rad_s",
         "posture_joint_velocity_rad_s", "maximum_following_error_rad",
         "following_error_pause_rad", "following_error_resume_rad",
-        "following_error_recovery_timeout_s", "endpoint_tolerance_rad",
+        "following_error_recovery_timeout_s", "joint_feedback_stale_timeout_s",
+        "endpoint_tolerance_rad",
         "endpoint_timeout_s", "cartesian_waypoint_step_m",
         "maximum_visual_xy_travel_m", "maximum_visual_step_m",
     )
@@ -119,6 +121,8 @@ def validate_motion_config(motion: dict[str, Any]) -> None:
         )
     if maximum > 0.35:
         raise ValueError("motion.maximum_following_error_rad must not exceed 0.35 rad")
+    if float(motion["joint_feedback_stale_timeout_s"]) > 5.0:
+        raise ValueError("motion.joint_feedback_stale_timeout_s must not exceed 5 s")
 
 
 def load_cycle_config(path: Path) -> dict[str, Any]:
@@ -165,6 +169,7 @@ def load_cycle_config(path: Path) -> dict[str, Any]:
         "following_error_resume_rad", float(motion["following_error_pause_rad"]) * 0.70
     )
     motion.setdefault("following_error_recovery_timeout_s", 5.0)
+    motion.setdefault("joint_feedback_stale_timeout_s", 1.0)
     validate_motion_config(motion)
     arm_command = data["arm_command_interface"]
     if arm_command.get("control_mode") == (
@@ -320,6 +325,10 @@ def resolve_cycle_venue_overrides(config: dict[str, Any], venue: dict[str, Any])
             ("motion", "following_error_recovery_timeout_s"),
             profile["arm_motion"]["following_error_recovery_timeout_s"],
         ),
+        "TMR_HAMBURG_ARM_JOINT_FEEDBACK_STALE_TIMEOUT_S": (
+            ("motion", "joint_feedback_stale_timeout_s"),
+            profile["arm_motion"]["joint_feedback_stale_timeout_s"],
+        ),
         "TMR_HAMBURG_ARM_COMMAND_SEMANTICS": (
             ("arm_command_interface", "control_mode"),
             profile["arm_command"]["semantics"],
@@ -387,6 +396,7 @@ def plan_report(config: dict[str, Any], object_name: str, descent_override: floa
                 "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
                 "following_error_resume_rad", "following_error_pause_rad",
                 "maximum_following_error_rad", "following_error_recovery_timeout_s",
+                "joint_feedback_stale_timeout_s",
             )
         },
     }
@@ -487,8 +497,9 @@ class NativeArmGraspCycle:
                 delay = max(0.001, period - (time.monotonic() - last_publish))
             if self.arm_keepalive_stop.wait(delay):
                 return
-            # The control loop remains the primary 50 Hz publisher. Fill only a
-            # real gap so the keepalive does not double the normal command rate.
+            # This thread owns normal arm publication.  Keeping the potentially
+            # blocking DDS publish away from the executor loop prevents all
+            # inbound callbacks from aging together on a slow publish call.
             last_publish = self.last_arm_publish_at
             if (
                 last_publish > 0.0
@@ -516,18 +527,26 @@ class NativeArmGraspCycle:
         if self.arm_keepalive_error is not None:
             raise RuntimeError(f"arm keepalive failed: {self.arm_keepalive_error}")
 
-    def spin_for(self, seconds: float, *, publish_hold: bool = True) -> None:
+    def service_input_callbacks(self) -> None:
+        """Drain a bounded batch without publishing or changing motion timing."""
         import rclpy
 
+        for _ in range(INPUT_CALLBACK_SPIN_BUDGET):
+            rclpy.spin_once(self.node, timeout_sec=0.0)
+        self._raise_arm_keepalive_error()
+
+    def spin_for(self, seconds: float) -> None:
         self._raise_arm_keepalive_error()
         deadline = time.monotonic() + seconds
         period = 1.0 / float(self.config["motion"]["publish_rate_hz"])
         while time.monotonic() < deadline:
             started = time.monotonic()
-            rclpy.spin_once(self.node, timeout_sec=0.0)
-            if publish_hold and all(self.commanded.values()):
-                self.publish_arm_holds()
-            self._raise_arm_keepalive_error()
+            # Drain several ready callbacks per tick.  The Hamburg sources run
+            # near 1 kHz, while this control loop is intentionally 50 Hz and
+            # has at least four live subscriptions (more in the full mission).
+            # A bounded drain keeps each stream current without changing the
+            # motion update rate.
+            self.service_input_callbacks()
             remaining = period - (time.monotonic() - started)
             if remaining > 0.0:
                 time.sleep(remaining)
@@ -535,10 +554,7 @@ class NativeArmGraspCycle:
     def wait_live(self, timeout_s: float) -> None:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            self.spin_for(
-                0.05,
-                publish_hold=bool(getattr(self, "neutral_stream_started_at", 0.0)),
-            )
+            self.spin_for(0.05)
             if all(self.states.values()):
                 self._start_neutral_arm_stream()
                 self._check_neutral_arm_stream()
@@ -585,6 +601,7 @@ class NativeArmGraspCycle:
             "arm_publish_count": self.arm_publish_count,
             "arm_keepalive_thread_alive": self.arm_keepalive_thread.is_alive(),
             "arm_keepalive_error": self.arm_keepalive_error,
+            "input_callbacks_per_control_tick": INPUT_CALLBACK_SPIN_BUDGET,
             "arm_command_sync": self.arm_command_sync,
             "gripper_sample_count": len(self.gripper_samples),
             "latest_gripper_feedback": (
@@ -714,7 +731,6 @@ class NativeArmGraspCycle:
             arm: list(values) for arm, values in initial.items()
         }
         self.neutral_stream_started_at = time.monotonic()
-        self.publish_arm_holds()
 
     def _check_neutral_arm_stream(self) -> None:
         initial = getattr(self, "neutral_initial_pose", None)
@@ -724,10 +740,13 @@ class NativeArmGraspCycle:
         maximum_drift = float(
             self.config["arm_command_interface"]["activation_sync_maximum_drift_rad"]
         )
+        stale_timeout = float(self.config["motion"]["joint_feedback_stale_timeout_s"])
         for arm in ("left", "right"):
-            if now - self.state_times[arm] > 0.5:
+            age = now - self.state_times[arm]
+            if age > stale_timeout:
                 raise RuntimeError(
-                    f"{arm} joint feedback became stale during neutral activation sync"
+                    f"{arm} joint feedback became stale during neutral activation sync "
+                    f"(age={age:.3f}s, limit={stale_timeout:.3f}s)"
                 )
             measured = self.states[arm]
             assert measured is not None
@@ -758,7 +777,10 @@ class NativeArmGraspCycle:
             self.spin_for(min(0.05, max(0.0, remaining)))
             self._check_neutral_arm_stream()
         self._check_neutral_arm_stream()
-        self.publish_arm_holds()
+        if self.last_arm_publish_at < started:
+            raise RuntimeError(
+                "neutral arm command stream was not published during activation sync"
+            )
         report = {
             "status": "neutral_stream_established",
             "control_mode": interface["control_mode"],
@@ -770,6 +792,9 @@ class NativeArmGraspCycle:
                 arm: round(value, 5) for arm, value in self.neutral_peak_drift.items()
             },
             "continuous_stream_required": True,
+            "joint_feedback_stale_timeout_s": float(
+                self.config["motion"]["joint_feedback_stale_timeout_s"]
+            ),
         }
         self.arm_command_sync = report
         print(json.dumps({"event": "arm_command_sync", **report}), file=sys.stderr, flush=True)
@@ -781,8 +806,12 @@ class NativeArmGraspCycle:
         if measured is None or commanded is None:
             raise RuntimeError(f"{arm} joint feedback disappeared")
         age = time.monotonic() - self.state_times[arm]
-        if age > 0.5:
-            raise RuntimeError(f"{arm} joint feedback became stale (age={age:.3f}s)")
+        stale_timeout = float(self.config["motion"]["joint_feedback_stale_timeout_s"])
+        if age > stale_timeout:
+            raise RuntimeError(
+                f"{arm} joint feedback became stale "
+                f"(age={age:.3f}s, limit={stale_timeout:.3f}s)"
+            )
         joint_errors = [abs(a - b) for a, b in zip(measured, commanded)]
         joint_index = max(range(len(joint_errors)), key=joint_errors.__getitem__)
         error = joint_errors[joint_index]
@@ -1016,6 +1045,7 @@ class NativeArmGraspCycle:
                     "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
                     "following_error_resume_rad", "following_error_pause_rad",
                     "maximum_following_error_rad", "following_error_recovery_timeout_s",
+                    "joint_feedback_stale_timeout_s",
                 )
             },
             "selected_descent_m": descent_m,
@@ -1236,7 +1266,7 @@ def main() -> int:
         spine = SpineControl(
             node,
             venue["interface_profile"]["spine"],
-            heartbeat=runner.publish_arm_holds,
+            heartbeat=runner.service_input_callbacks,
         )
         report = runner.run(args.object, descent, spine)
     except KeyboardInterrupt:

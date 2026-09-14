@@ -173,6 +173,25 @@ class HamburgMotionTests(unittest.TestCase):
         self.assertFalse(runner.arm_keepalive_thread.is_alive())
         self.assertIsNone(runner.arm_keepalive_error)
 
+    def test_input_executor_never_waits_for_arm_publication(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.node = object()
+        runner.commanded = {"left": [0.0] * 7, "right": [0.0] * 7}
+        runner.arm_keepalive_error = None
+        runner.publish_arm_holds = mock.Mock(side_effect=AssertionError(
+            "DDS arm publication must stay off the input executor thread"
+        ))
+        fake_rclpy = mock.Mock()
+        with mock.patch.dict(sys.modules, {"rclpy": fake_rclpy}), \
+                mock.patch("hamburg_grasp_cycle.time.monotonic",
+                           side_effect=[0.0, 0.0, 0.0, 0.0, 0.2]), \
+                mock.patch("hamburg_grasp_cycle.time.sleep"):
+            runner.spin_for(0.1)
+
+        self.assertEqual(fake_rclpy.spin_once.call_count, 16)
+        runner.publish_arm_holds.assert_not_called()
+
     def test_keepalive_failure_is_never_reported_as_success(self) -> None:
         runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
         runner.config = deepcopy(self.grasp)
@@ -204,14 +223,15 @@ class HamburgMotionTests(unittest.TestCase):
         runner.neutral_initial_pose = None
         runner.neutral_peak_drift = {"left": 0.0, "right": 0.0}
         runner.publish_arm_holds = mock.Mock()
-        publish_hold_arguments = []
+        spin_calls = 0
 
-        def spin(_duration, *, publish_hold=True):
-            publish_hold_arguments.append(publish_hold)
+        def spin(_duration):
+            nonlocal spin_calls
+            spin_calls += 1
             now = time.monotonic()
             runner.states = {"left": [0.1] * 7, "right": [0.2] * 7}
             runner.state_times = {"left": now, "right": now}
-            if len(publish_hold_arguments) == 2:
+            if spin_calls == 2:
                 runner.gripper_samples.append((now, [0.04, 0.04]))
                 runner.images.append((1, object()))
 
@@ -219,10 +239,10 @@ class HamburgMotionTests(unittest.TestCase):
         with mock.patch("hamburg_grasp_cycle.decode_wrist_rgb", return_value=object()):
             runner.wait_live(0.5)
 
-        self.assertEqual(publish_hold_arguments[:2], [False, True])
+        self.assertEqual(spin_calls, 2)
         self.assertGreater(runner.neutral_stream_started_at, 0.0)
         self.assertEqual(runner.input_activation_reference["right"], [0.2] * 7)
-        runner.publish_arm_holds.assert_called_once()
+        runner.publish_arm_holds.assert_not_called()
 
     def test_neutral_activation_sync_precedes_motion_and_rejects_drift(self) -> None:
         runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
@@ -230,10 +250,12 @@ class HamburgMotionTests(unittest.TestCase):
         runner.config["arm_command_interface"]["activation_sync_duration_s"] = 0.002
         runner.states = {"left": [0.1] * 7, "right": [0.2] * 7}
         runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+        runner.last_arm_publish_at = 0.0
         runner.publish_arm_holds = mock.Mock()
 
         def neutral_spin(duration):
             runner.publish_arm_holds()
+            runner.last_arm_publish_at = time.monotonic()
             runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
             time.sleep(duration)
 
@@ -242,7 +264,7 @@ class HamburgMotionTests(unittest.TestCase):
         self.assertEqual(report["status"], "neutral_stream_established")
         self.assertEqual(report["direction"], [-1, -1, 1, 1, 1, 1, -1])
         self.assertEqual(report["input_at_activation"]["right"], [0.2] * 7)
-        self.assertGreaterEqual(runner.publish_arm_holds.call_count, 2)
+        self.assertGreaterEqual(runner.publish_arm_holds.call_count, 1)
 
         runner.config["arm_command_interface"]["activation_sync_duration_s"] = 0.01
         runner.config["arm_command_interface"]["activation_sync_maximum_drift_rad"] = 0.01
@@ -266,6 +288,7 @@ class HamburgMotionTests(unittest.TestCase):
         for key in (
             "posture_joint_velocity_rad_s", "following_error_pause_rad",
             "following_error_resume_rad", "following_error_recovery_timeout_s",
+            "joint_feedback_stale_timeout_s",
         ):
             legacy["motion"].pop(key)
         legacy["arm_command_interface"] = {
@@ -299,6 +322,27 @@ class HamburgMotionTests(unittest.TestCase):
             loaded["arm_command_interface"]["direction"],
             [-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0],
         )
+        self.assertEqual(loaded["motion"]["joint_feedback_stale_timeout_s"], 1.0)
+
+    def test_feedback_age_guard_uses_bounded_venue_threshold(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.states = {"left": [0.0] * 7, "right": [0.0] * 7}
+        runner.commanded = {"left": [0.0] * 7, "right": [0.0] * 7}
+        now = time.monotonic()
+        runner.state_times = {"left": now - 0.65, "right": now - 0.65}
+        runner._check_following("left")
+        runner.state_times["left"] = now - 1.2
+        with self.assertRaisesRegex(RuntimeError, r"limit=1\.000s"):
+            runner._check_following("left")
+
+        invalid = deepcopy(self.grasp)
+        invalid["motion"]["joint_feedback_stale_timeout_s"] = 5.1
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid-grasp.json"
+            path.write_text(json.dumps(invalid), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must not exceed 5 s"):
+                load_cycle_config(path)
 
     def test_transient_following_lag_holds_and_recovers(self) -> None:
         runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
@@ -501,6 +545,7 @@ class HamburgMotionTests(unittest.TestCase):
             "TMR_HAMBURG_HEAD_CAMERA_HEIGHT": "720",
             "TMR_HAMBURG_ARM_POSTURE_VELOCITY_RAD_S": "0.03",
             "TMR_HAMBURG_ARM_MAXIMUM_FOLLOWING_ERROR_RAD": "0.22",
+            "TMR_HAMBURG_ARM_JOINT_FEEDBACK_STALE_TIMEOUT_S": "1.5",
         }):
             venue = load_config(ROOT / "config" / "venue.json")
         grasp = resolve_cycle_venue_overrides(self.grasp, venue)
@@ -510,6 +555,7 @@ class HamburgMotionTests(unittest.TestCase):
         self.assertEqual(grasp["spine"]["initial_target_m"], 0.65)
         self.assertEqual(grasp["motion"]["posture_joint_velocity_rad_s"], 0.03)
         self.assertEqual(grasp["motion"]["maximum_following_error_rad"], 0.22)
+        self.assertEqual(grasp["motion"]["joint_feedback_stale_timeout_s"], 1.5)
         self.assertEqual((mission["head_camera"]["width"], mission["head_camera"]["height"]),
                          (1280, 720))
 

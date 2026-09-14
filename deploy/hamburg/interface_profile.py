@@ -44,6 +44,7 @@ def load_interface_profile(
         ),
         "provenance": "Hamburg organizer-confirmed relative GELLO controller semantics",
     })
+    profile["arm_motion"].setdefault("joint_feedback_stale_timeout_s", 1.0)
     environ = os.environ if environment is None else environment
     applied = {}
     for name, dotted_path in profile.get("environment_overrides", {}).items():
@@ -95,7 +96,7 @@ def validate_interface_profile(profile: dict[str, Any]) -> None:
     for field in (
         "posture_joint_velocity_rad_s", "maximum_following_error_rad",
         "following_error_pause_rad", "following_error_resume_rad",
-        "following_error_recovery_timeout_s",
+        "following_error_recovery_timeout_s", "joint_feedback_stale_timeout_s",
     ):
         value = float(arm_motion[field])
         if not math.isfinite(value) or value <= 0.0:
@@ -109,6 +110,8 @@ def validate_interface_profile(profile: dict[str, Any]) -> None:
         raise ValueError(
             "arm_motion following-error limits must satisfy resume < pause < maximum <= 0.35"
         )
+    if float(arm_motion["joint_feedback_stale_timeout_s"]) > 5.0:
+        raise ValueError("arm_motion.joint_feedback_stale_timeout_s must not exceed 5 s")
     semantics = str(arm_command["semantics"])
     if semantics not in {
         "relative_direction_mapped_gello", "absolute_robot_joint_positions"

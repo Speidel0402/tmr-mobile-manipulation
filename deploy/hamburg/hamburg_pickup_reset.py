@@ -60,6 +60,7 @@ def plan_report(config: dict[str, Any]) -> dict[str, Any]:
                 "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
                 "following_error_resume_rad", "following_error_pause_rad",
                 "maximum_following_error_rad", "following_error_recovery_timeout_s",
+                "joint_feedback_stale_timeout_s",
             )
         },
         "arm_command_interface": config["arm_command_interface"],
@@ -89,6 +90,7 @@ def run_reset(
                 "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
                 "following_error_resume_rad", "following_error_pause_rad",
                 "maximum_following_error_rad", "following_error_recovery_timeout_s",
+                "joint_feedback_stale_timeout_s",
             )
         },
         "phases_completed": [],
@@ -231,7 +233,7 @@ def main() -> int:
         spine = SpineControl(
             node,
             venue["interface_profile"]["spine"],
-            heartbeat=runner.publish_arm_holds,
+            heartbeat=runner.service_input_callbacks,
         )
         report = run_reset(runner, spine, config, args.output_dir)
     except KeyboardInterrupt:

@@ -44,6 +44,7 @@ def main() -> int:
     parser.add_argument("--following-error-pause-rad", type=float)
     parser.add_argument("--following-error-resume-rad", type=float)
     parser.add_argument("--following-error-recovery-timeout-s", type=float)
+    parser.add_argument("--joint-feedback-stale-timeout-s", type=float)
     args = parser.parse_args()
 
     mission = json.loads(args.mission_template.read_text(encoding="utf-8"))
@@ -73,6 +74,7 @@ def main() -> int:
         (args.following_error_pause_rad, "following_error_pause_rad"),
         (args.following_error_resume_rad, "following_error_resume_rad"),
         (args.following_error_recovery_timeout_s, "following_error_recovery_timeout_s"),
+        (args.joint_feedback_stale_timeout_s, "joint_feedback_stale_timeout_s"),
     ):
         set_if(argument, grasp["motion"], key)
     for key, value in measurements.items():

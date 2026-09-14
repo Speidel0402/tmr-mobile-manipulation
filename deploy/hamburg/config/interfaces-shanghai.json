@@ -47,7 +47,8 @@
     "following_error_pause_rad": 0.20,
     "following_error_resume_rad": 0.14,
     "following_error_recovery_timeout_s": 5.0,
-    "provenance": "Hamburg trial 1 showed fresh tracking feedback and a 0.1603 rad transient lag at the original 0.06 rad/s parking ramp. The normal ramp is retained, the hard guard has measured margin, and a higher-lag fallback pauses target advancement while the controller catches up; stale, persistent, or hard-limit errors still abort."
+    "joint_feedback_stale_timeout_s": 1.0,
+    "provenance": "Hamburg trials showed a 0.1603 rad tracking transient and process-local callback age peaks of 0.501-0.613 s while all measured streams remained healthy. The normal ramp is retained; arm publication is isolated from input callback servicing, and the bounded 1.0 s feedback-age guard leaves measured scheduling margin while still aborting a real stale stream."
   },
   "environment_overrides": {
     "TMR_HAMBURG_LEFT_GRIPPER_TOPIC": "gripper.left_topic",
@@ -68,6 +69,7 @@
     "TMR_HAMBURG_ARM_FOLLOWING_ERROR_PAUSE_RAD": "arm_motion.following_error_pause_rad",
     "TMR_HAMBURG_ARM_FOLLOWING_ERROR_RESUME_RAD": "arm_motion.following_error_resume_rad",
     "TMR_HAMBURG_ARM_FOLLOWING_ERROR_RECOVERY_TIMEOUT_S": "arm_motion.following_error_recovery_timeout_s",
+    "TMR_HAMBURG_ARM_JOINT_FEEDBACK_STALE_TIMEOUT_S": "arm_motion.joint_feedback_stale_timeout_s",
     "TMR_HAMBURG_ARM_COMMAND_SEMANTICS": "arm_command.semantics",
     "TMR_HAMBURG_ARM_ACTIVATION_SYNC_DURATION_S": "arm_command.activation_sync_duration_s",
     "TMR_HAMBURG_ARM_ACTIVATION_SYNC_MAXIMUM_DRIFT_RAD": "arm_command.activation_sync_maximum_drift_rad",

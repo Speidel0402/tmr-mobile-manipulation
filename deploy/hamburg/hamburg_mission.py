@@ -293,6 +293,14 @@ def plan_report(mission: dict[str, Any], grasp: dict[str, Any]) -> dict[str, Any
         "route_profile_warning": mission["profile_warning"],
         "hamburg_measurements": mission["hamburg_measurements"],
         "grasp_parameter_scope": grasp["parameter_scope"],
+        "arm_motion": {
+            key: grasp["motion"][key] for key in (
+                "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
+                "following_error_resume_rad", "following_error_pause_rad",
+                "maximum_following_error_rad", "following_error_recovery_timeout_s",
+                "joint_feedback_stale_timeout_s",
+            )
+        },
         "outbound": mission["outbound_shanghai_reference"],
         "post_pick": mission["post_pick_shanghai_reference"],
         "letter_search": mission["letter_search_shanghai_reference"],
@@ -873,6 +881,14 @@ class HamburgMission:
             "single_ros_node_during_motion": True, "assignment": self.mission["assignment"],
             "route_profile_warning": self.mission["profile_warning"],
             "arm_command_interface": self.grasp["arm_command_interface"],
+            "arm_motion": {
+                key: self.grasp["motion"][key] for key in (
+                    "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
+                    "following_error_resume_rad", "following_error_pause_rad",
+                    "maximum_following_error_rad", "following_error_recovery_timeout_s",
+                    "joint_feedback_stale_timeout_s",
+                )
+            },
             "applied_venue_overrides": {
                 "mission": self.mission.get("applied_venue_overrides", {}),
                 "grasp": self.grasp.get("applied_venue_overrides", {}),
@@ -1007,7 +1023,7 @@ def main() -> int:
         spine = SpineControl(
             node,
             venue["interface_profile"]["spine"],
-            heartbeat=arm.publish_arm_holds,
+            heartbeat=arm.service_input_callbacks,
         )
         mission_runner = HamburgMission(arm, base, spine, mission, grasp, args.output_dir)
         report = mission_runner.run()

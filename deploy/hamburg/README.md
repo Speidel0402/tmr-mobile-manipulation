@@ -117,11 +117,13 @@ clearly identified Shanghai references.
 The site-config command also accepts `--posture-velocity-rad-s`,
 `--maximum-following-error-rad`, `--following-error-pause-rad`,
 `--following-error-resume-rad`, and
-`--following-error-recovery-timeout-s`. For a quick venue-only trial, the same
+`--following-error-recovery-timeout-s`, and
+`--joint-feedback-stale-timeout-s`. For a quick venue-only trial, the same
 values can be supplied without editing a file:
 
 ```bash
 export TMR_HAMBURG_ARM_POSTURE_VELOCITY_RAD_S=0.05
+export TMR_HAMBURG_ARM_JOINT_FEEDBACK_STALE_TIMEOUT_S=1.5
 ```
 
 The relaxed default guard should be tried first, with the original motion
@@ -132,10 +134,13 @@ JSON report.
 
 ## Run order
 
-Use the organizer's already sourced domain 0 / Fast DDS UDP-only environment.
-That sourced Humble workspace must expose the organizer's
+Use the organizer's domain 0 / Fast DDS UDP-only environment. In every new
+terminal, source `/opt/ros/humble/setup.bash` and then the Hamburg testbed
+workspace overlay used to launch the robot. That overlay must expose the organizer's
 `franka_spine_msgs/action/MoveAbsolute` and `franka_spine_msgs/srv/GetPosition`
-types; the native preflight checks this before any motion.
+types; the native preflight checks this before any motion. A
+`ModuleNotFoundError` for `franka_spine_msgs` means the current terminal is
+missing that overlay, not that the running spine interface is absent.
 First run the native check without the temporary odometry or spine relays:
 
 ```bash

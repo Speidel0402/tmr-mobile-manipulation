@@ -141,6 +141,7 @@ class HamburgPackageTests(unittest.TestCase):
         self.assertEqual(
             profile["arm_command"]["direction"], [-1, -1, 1, 1, 1, 1, -1]
         )
+        self.assertEqual(profile["arm_motion"]["joint_feedback_stale_timeout_s"], 1.0)
         self.assertEqual((profile["head_camera"]["width"], profile["head_camera"]["height"]), (640, 360))
         self.assertEqual(profile["head_camera"]["zed_pub_resolution"], "CUSTOM")
         organizer_text = (ROOT / "ORGANIZER_ACTIONS.md").read_text(
@@ -188,6 +189,7 @@ class HamburgPackageTests(unittest.TestCase):
                 "TMR_HAMBURG_SPINE_HOME_M": "0.65",
                 "TMR_HAMBURG_HEAD_CAMERA_WIDTH": "1280",
                 "TMR_HAMBURG_HEAD_CAMERA_HEIGHT": "720",
+                "TMR_HAMBURG_ARM_JOINT_FEEDBACK_STALE_TIMEOUT_S": "1.5",
             },
         )
         resolved = profile_module.apply_interface_profile(self.config, profile)
@@ -205,6 +207,7 @@ class HamburgPackageTests(unittest.TestCase):
         self.assertEqual(resolved["service_endpoints"][0]["service"], "/franka_spine_node/get_position")
         head = next(s for s in resolved["streams"] if s["name"] == "head_camera")
         self.assertEqual((head["expected_width"], head["expected_height"]), (1280, 720))
+        self.assertEqual(profile["arm_motion"]["joint_feedback_stale_timeout_s"], 1.5)
         self.assertEqual(
             profile["applied_environment_overrides"],
             {
@@ -212,6 +215,7 @@ class HamburgPackageTests(unittest.TestCase):
                 "TMR_HAMBURG_SPINE_HOME_M": "0.65",
                 "TMR_HAMBURG_HEAD_CAMERA_WIDTH": "1280",
                 "TMR_HAMBURG_HEAD_CAMERA_HEIGHT": "720",
+                "TMR_HAMBURG_ARM_JOINT_FEEDBACK_STALE_TIMEOUT_S": "1.5",
             },
         )
 

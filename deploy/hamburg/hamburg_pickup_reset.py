@@ -23,7 +23,7 @@ from hamburg_grasp_cycle import (
     resolve_cycle_venue_overrides,
     write_report,
 )
-from hamburg_preflight import environment_report, load_config
+from hamburg_preflight import DEFAULT_INTERFACE_CONFIG, environment_report, load_config
 from spine_control import SpineControl
 
 
@@ -55,6 +55,7 @@ def plan_report(config: dict[str, Any]) -> dict[str, Any]:
         ],
         "parameter_profile": config["profile_name"],
         "parameter_scope": config["parameter_scope"],
+        "applied_venue_overrides": config.get("applied_venue_overrides", {}),
         "arm_motion": {
             key: config["motion"][key] for key in (
                 "posture_joint_velocity_rad_s", "maximum_joint_velocity_rad_s",
@@ -164,6 +165,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path(os.environ.get(
         "TMR_HAMBURG_GRASP_CYCLE_CONFIG", str(DEFAULT_CYCLE_CONFIG))))
     parser.add_argument("--venue-config", type=Path, default=DEFAULT_VENUE_CONFIG)
+    parser.add_argument("--interface-config", type=Path, default=DEFAULT_INTERFACE_CONFIG)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/tmr_hamburg_reset"))
     return parser.parse_args()
@@ -174,6 +176,8 @@ def main() -> int:
     report_path = args.output or args.output_dir / "pickup-reset-report.json"
     try:
         config = load_cycle_config(args.config)
+        venue = load_config(args.venue_config, args.interface_config)
+        config = resolve_cycle_venue_overrides(config, venue)
     except Exception as exc:
         write_report({
             "status": "invalid_configuration",
@@ -189,8 +193,6 @@ def main() -> int:
         return 0
 
     try:
-        venue = load_config(args.venue_config)
-        config = resolve_cycle_venue_overrides(config, venue)
         environment, errors = environment_report(venue)
     except Exception as exc:
         write_report({

@@ -29,7 +29,7 @@ from hamburg_grasp_cycle import (
     write_report,
 )
 from hamburg_motion_core import cartesian_waypoints, derive_mount_rotation, gripper_contact_report
-from hamburg_preflight import environment_report, load_config
+from hamburg_preflight import DEFAULT_INTERFACE_CONFIG, environment_report, load_config
 from spine_control import SpineControl
 
 
@@ -463,11 +463,18 @@ class NativeBaseControl:
         return values[min(2, len(values) - 1)]
 
     def _fresh_pose(self) -> tuple[float, float, float]:
+        self.arm.service_input_callbacks()
         self.assert_fresh()
         assert self.pose is not None
         return self.pose
 
     def _tick(self, desired: tuple[float, float, float], last_tick: float) -> float:
+        self.arm.service_input_callbacks()
+        self.assert_fresh()
+        # These checks do not wait for recovery while a previous base
+        # velocity is active. The route wrappers latch zero on any failure.
+        for arm in ("left", "right"):
+            self.arm._check_following(arm)
         minimum = float(self.config["base_motion"]["minimum_lidar_range_m"])
         relevant = []
         if desired[0] > 0.002:
@@ -667,13 +674,18 @@ class NativeBaseControl:
         progress_at = time.monotonic()
         deadline = time.monotonic() + max(45.0, float(search["maximum_right_m"]) / float(search["search_speed_mps"]) + 20.0)
         while time.monotonic() < deadline:
+            self.arm.service_input_callbacks()
             if time.monotonic() - self.head_at > 0.8:
                 raise RuntimeError("head RGB stream became stale during letter search")
             x, y, yaw = self._fresh_pose()
             dx, dy = x - start_x, y - start_y
             right_m = dx * right_axis[0] + dy * right_axis[1]
             forward_drift = dx * forward_axis[0] + dy * forward_axis[1]
-            fresh = [(stamp, frame) for stamp, frame in self.head_frames if stamp > last_stamp]
+            # Replaying an image backlog delays every ROS input and acts on
+            # old views while the base moves. Each control iteration uses
+            # only the newest unseen frame; stability still requires
+            # different frame timestamps across iterations.
+            fresh = [self.head_frames[-1]] if self.head_frames and self.head_frames[-1][0] > last_stamp else []
             for stamp, message in fresh:
                 last_stamp = stamp
                 frames_processed += 1
@@ -690,6 +702,12 @@ class NativeBaseControl:
                     consecutive_misses += 1
                     if consecutive_misses >= 3:
                         recent.clear()
+            # Detection can take longer than one control tick. Refresh the
+            # pose and sensors before evaluating progress or sending motion.
+            x, y, yaw = self._fresh_pose()
+            dx, dy = x - start_x, y - start_y
+            right_m = dx * right_axis[0] + dy * right_axis[1]
+            forward_drift = dx * forward_axis[0] + dy * forward_axis[1]
             stable_count = int(search["stable_frames"])
             window = list(recent)[-stable_count:]
             if len(window) == stable_count:
@@ -958,6 +976,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grasp-config", type=Path, default=Path(os.environ.get(
         "TMR_HAMBURG_GRASP_CYCLE_CONFIG", str(DEFAULT_GRASP_CONFIG))))
     parser.add_argument("--venue-config", type=Path, default=DEFAULT_VENUE_CONFIG)
+    parser.add_argument("--interface-config", type=Path, default=DEFAULT_INTERFACE_CONFIG)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/tmr_hamburg_mission"))
     return parser.parse_args()
@@ -970,6 +989,9 @@ def main() -> int:
         mission = json.loads(args.config.read_text(encoding="utf-8"))
         validate_mission_config(mission)
         grasp = load_cycle_config(args.grasp_config)
+        venue = load_config(args.venue_config, args.interface_config)
+        grasp = resolve_cycle_venue_overrides(grasp, venue)
+        mission = resolve_mission_venue_overrides(mission, venue)
         validate_combined_configs(mission, grasp)
     except Exception as exc:
         write_report({
@@ -984,9 +1006,6 @@ def main() -> int:
         write_report(plan_report(mission, grasp), args.output)
         return 0
     try:
-        venue = load_config(args.venue_config)
-        grasp = resolve_cycle_venue_overrides(grasp, venue)
-        mission = resolve_mission_venue_overrides(mission, venue)
         environment, errors = environment_report(venue)
     except Exception as exc:
         write_report({

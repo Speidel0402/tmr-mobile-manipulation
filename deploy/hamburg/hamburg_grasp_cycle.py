@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from copy import deepcopy
+import importlib
 import json
 import math
 import os
@@ -32,7 +33,7 @@ from hamburg_motion_core import (
     gripper_contact_report,
     smooth_joint_targets,
 )
-from hamburg_preflight import environment_report, load_config
+from hamburg_preflight import DEFAULT_INTERFACE_CONFIG, environment_report, load_config
 from spine_control import SpineControl
 
 
@@ -374,6 +375,7 @@ def plan_report(config: dict[str, Any], object_name: str, descent_override: floa
     descent = float(descent_override if descent_override is not None else config["objects"][object_name]["descent_m"])
     return {
         "schema_version": 1,
+        "status": "plan",
         "operation": "Hamburg autonomous observation-grasp-release trial",
         "object": object_name,
         "command_interface": config["arm_command_interface"],
@@ -390,6 +392,7 @@ def plan_report(config: dict[str, Any], object_name: str, descent_override: floa
         "single_ros_node_during_motion": True,
         "motion_commanded": False,
         "parameter_scope": config["parameter_scope"],
+        "applied_venue_overrides": config.get("applied_venue_overrides", {}),
         "selected_descent_m": descent,
         "arm_motion": {
             key: config["motion"][key] for key in (
@@ -408,6 +411,11 @@ class NativeArmGraspCycle:
         from sensor_msgs.msg import Image, JointState
         from std_msgs.msg import Float32
 
+        # Load vision's native extension before any controller neutral stream
+        # starts; a cold import must not consume its freshness window.
+        import_started = time.monotonic()
+        importlib.import_module("cv2")
+        self.opencv_import_duration_s = time.monotonic() - import_started
         self.node = node
         self.venue = venue
         self.config = config
@@ -431,6 +439,10 @@ class NativeArmGraspCycle:
         }
         self.last_arm_publish_at = 0.0
         self.arm_publish_count = 0
+        self.arm_publications: dict[str, dict[str, Any] | None] = {"left": None, "right": None}
+        self.input_service_last_at = 0.0
+        self.input_service_maximum_gap_s = 0.0
+        self.startup_wrist_decode_duration_s = 0.0
         self.arm_command_sync: dict[str, Any] | None = None
         self.arm_publish_lock = threading.RLock()
         self.arm_keepalive_stop = threading.Event()
@@ -531,9 +543,18 @@ class NativeArmGraspCycle:
         """Drain a bounded batch without publishing or changing motion timing."""
         import rclpy
 
+        now = time.monotonic()
+        previous = getattr(self, "input_service_last_at", 0.0)
+        if previous > 0.0:
+            self.input_service_maximum_gap_s = max(
+                getattr(self, "input_service_maximum_gap_s", 0.0), now - previous
+            )
+        self.input_service_last_at = now
         for _ in range(INPUT_CALLBACK_SPIN_BUDGET):
             rclpy.spin_once(self.node, timeout_sec=0.0)
         self._raise_arm_keepalive_error()
+        if getattr(self, "arm_command_sync", None) is not None:
+            self._check_arm_publication_health()
 
     def spin_for(self, seconds: float) -> None:
         self._raise_arm_keepalive_error()
@@ -571,12 +592,18 @@ class NativeArmGraspCycle:
             missing.append("left wrist image")
         if missing:
             raise RuntimeError("missing live inputs: " + ", ".join(missing))
+        decode_started = time.monotonic()
         try:
             decode_wrist_rgb(self.images[-1][1])
         except Exception as exc:
             raise RuntimeError(
                 f"left wrist image is unusable before motion: {type(exc).__name__}: {exc}"
             ) from exc
+        finally:
+            self.startup_wrist_decode_duration_s = time.monotonic() - decode_started
+        # The first decode lazily imports OpenCV.  Refresh callbacks after that
+        # potentially slow operation before judging stream freshness.
+        self.service_input_callbacks()
         self._start_neutral_arm_stream()
         self._check_neutral_arm_stream()
 
@@ -599,6 +626,19 @@ class NativeArmGraspCycle:
                 if self.last_arm_publish_at > 0.0 else None
             ),
             "arm_publish_count": self.arm_publish_count,
+            "arm_publications": getattr(self, "arm_publications", {}),
+            "maximum_input_service_gap_s": round(
+                getattr(self, "input_service_maximum_gap_s", 0.0), 4
+            ),
+            "startup_wrist_decode_duration_s": round(
+                getattr(self, "startup_wrist_decode_duration_s", 0.0), 4
+            ),
+            "opencv_import_duration_s": round(getattr(self, "opencv_import_duration_s", 0.0), 4),
+            "publication_environment": {
+                name: os.environ.get(name) for name in (
+                    "RMW_FASTRTPS_PUBLICATION_MODE", "RMW_FASTRTPS_USE_QOS_FROM_XML"
+                )
+            },
             "arm_keepalive_thread_alive": self.arm_keepalive_thread.is_alive(),
             "arm_keepalive_error": self.arm_keepalive_error,
             "input_callbacks_per_control_tick": INPUT_CALLBACK_SPIN_BUDGET,
@@ -627,14 +667,19 @@ class NativeArmGraspCycle:
         while time.monotonic() < deadline:
             self.spin_for(0.05)
             self._check_all_following()
-            fresh = [(stamp, image) for stamp, image in self.images if stamp > last_stamp]
+            fresh = [self.images[-1]] if self.images and self.images[-1][0] > last_stamp else []
             for stamp, image in fresh:
                 last_stamp = stamp
                 fresh_frames += 1
                 try:
-                    return decode_wrist_rgb(image)
+                    frame = decode_wrist_rgb(image)
                 except Exception as exc:
                     decode_errors.append(f"{type(exc).__name__}: {exc}")
+                    continue
+                finally:
+                    self.service_input_callbacks()
+                self._check_all_following()
+                return frame
         age = time.monotonic() - self.image_at if self.image_at > 0.0 else math.inf
         detail = "; ".join(decode_errors) if decode_errors else "no post-reset frame received"
         raise RuntimeError(
@@ -683,11 +728,14 @@ class NativeArmGraspCycle:
 
     def publish_arm_holds(self) -> None:
         with self.arm_publish_lock:
+            if not hasattr(self, "arm_publications"):
+                self.arm_publications = {"left": None, "right": None}
             published_any = False
             for arm in ("left", "right"):
                 values = self.commanded[arm]
                 if values is None:
                     continue
+                values = list(values)
                 mode = self.config["arm_command_interface"]["control_mode"]
                 if mode == RELATIVE_GELLO_MODE:
                     robot_zero = self.robot_activation_reference[arm]
@@ -707,7 +755,22 @@ class NativeArmGraspCycle:
                 message.header.frame_id = "tmr_hamburg_autonomous_gello_input"
                 message.name = list(self.config["joint_names"][arm])
                 message.position = published
+                publish_started = time.monotonic()
                 self.arm_publishers[arm].publish(message)
+                completed = time.monotonic()
+                previous = self.arm_publications[arm]
+                duration = completed - publish_started
+                # Replace a complete snapshot so the motion thread never sees
+                # an acknowledgement paired with a different robot target.
+                self.arm_publications[arm] = {
+                    "robot_target": values,
+                    "completed_at": completed,
+                    "first_completed_at": previous["first_completed_at"] if previous else completed,
+                    "count": previous["count"] + 1 if previous else 1,
+                    "duration_s": duration,
+                    "maximum_duration_s": max(previous["maximum_duration_s"], duration) if previous else duration,
+                    "maximum_gap_s": max(previous["maximum_gap_s"], completed - previous["completed_at"]) if previous else 0.0,
+                }
                 self.last_published_arm_input[arm] = list(published)
                 published_any = True
             if published_any:
@@ -771,16 +834,24 @@ class NativeArmGraspCycle:
         interface = self.config["arm_command_interface"]
         self._start_neutral_arm_stream()
         duration = float(interface["activation_sync_duration_s"])
-        started = self.neutral_stream_started_at
+        timeout = float(self.config["motion"]["joint_feedback_stale_timeout_s"])
+        deadline = time.monotonic() + timeout
+        while not all(getattr(self, "arm_publications", {}).get(arm) for arm in ("left", "right")):
+            self.spin_for(min(0.02, max(0.0, deadline - time.monotonic())))
+            self._check_neutral_arm_stream()
+            if time.monotonic() >= deadline and not all(
+                self.arm_publications.get(arm) for arm in ("left", "right")
+            ):
+                raise RuntimeError("neutral arm command stream was not published for both arms")
+        # Count the synchronization interval from actual publication on both
+        # topics, not from assigning the first target in the main thread.
+        started = max(self.arm_publications[arm]["first_completed_at"] for arm in ("left", "right"))
         while time.monotonic() - started < duration:
             remaining = duration - (time.monotonic() - started)
             self.spin_for(min(0.05, max(0.0, remaining)))
             self._check_neutral_arm_stream()
         self._check_neutral_arm_stream()
-        if self.last_arm_publish_at < started:
-            raise RuntimeError(
-                "neutral arm command stream was not published during activation sync"
-            )
+        self._check_arm_publication_health()
         report = {
             "status": "neutral_stream_established",
             "control_mode": interface["control_mode"],
@@ -800,7 +871,36 @@ class NativeArmGraspCycle:
         print(json.dumps({"event": "arm_command_sync", **report}), file=sys.stderr, flush=True)
         return report
 
+    def _check_arm_publication_health(self, selected_arm: str | None = None) -> None:
+        now = time.monotonic()
+        timeout = float(self.config["motion"]["joint_feedback_stale_timeout_s"])
+        for arm in ((selected_arm,) if selected_arm is not None else ("left", "right")):
+            publication = self.arm_publications[arm]
+            if publication is None or now - publication["completed_at"] > timeout:
+                age = now - publication["completed_at"] if publication else math.inf
+                raise RuntimeError(
+                    f"{arm} arm command publication became stale "
+                    f"(age={age:.3f}s, limit={timeout:.3f}s)"
+                )
+
+    def _wait_for_arm_publication(self, arm: str, target: list[float]) -> None:
+        """Wait for local publish return, not remote receipt, for each ramp point."""
+        timeout = float(self.config["motion"]["joint_feedback_stale_timeout_s"])
+        deadline = time.monotonic() + timeout
+        while True:
+            self._raise_arm_keepalive_error()
+            publication = self.arm_publications[arm]
+            if publication is not None and publication["robot_target"] == target:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{arm} arm target publication timed out after {timeout:.3f}s")
+            self.service_input_callbacks()
+            self._check_all_following()
+            time.sleep(min(0.002, max(0.0, deadline - time.monotonic())))
+
     def _check_following(self, arm: str) -> float:
+        if getattr(self, "arm_command_sync", None) is not None:
+            self._check_arm_publication_health(arm)
         measured = self.states[arm]
         commanded = self.commanded[arm]
         if measured is None or commanded is None:
@@ -897,6 +997,7 @@ class NativeArmGraspCycle:
             for point in smooth_joint_targets(start, target, rate, velocity):
                 self.commanded[arm] = point
                 self.spin_for(1.0 / rate)
+                self._wait_for_arm_publication(arm, point)
                 self._check_all_following()
         tolerance = float(self.config["motion"]["endpoint_tolerance_rad"])
         timeout = float(self.config["motion"]["endpoint_timeout_s"])
@@ -929,6 +1030,7 @@ class NativeArmGraspCycle:
         for point in targets:
             self.commanded[arm] = point
             self.spin_for(1.0 / rate)
+            self._wait_for_arm_publication(arm, point)
             self._check_all_following()
         self.move_arm_targets(arm, [list(target)])
 
@@ -973,7 +1075,9 @@ class NativeArmGraspCycle:
         while time.monotonic() < deadline:
             self.spin_for(0.05)
             self._check_all_following()
-            fresh = [(stamp, image) for stamp, image in self.images if stamp > last_stamp]
+            # Process the newest frame only.  A detector can take longer than
+            # the camera period; draining an old batch starves joint callbacks.
+            fresh = [self.images[-1]] if self.images and self.images[-1][0] > last_stamp else []
             for stamp, image in fresh:
                 last_stamp = stamp
                 fresh_frames += 1
@@ -983,6 +1087,8 @@ class NativeArmGraspCycle:
                 except Exception as exc:
                     detection_errors.append(f"{type(exc).__name__}: {exc}")
                     points.append(None)
+                self.service_input_callbacks()
+                self._check_all_following()
                 valid = [point for point in points if point is not None]
                 if len(valid) >= 5 and len(points) >= 5 and all(point is not None for point in list(points)[-2:]):
                     array = np.asarray(valid, dtype=float)
@@ -1195,6 +1301,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path(os.environ.get(
         "TMR_HAMBURG_GRASP_CYCLE_CONFIG", str(DEFAULT_CYCLE_CONFIG))))
     parser.add_argument("--venue-config", type=Path, default=DEFAULT_VENUE_CONFIG)
+    parser.add_argument("--interface-config", type=Path, default=DEFAULT_INTERFACE_CONFIG)
     parser.add_argument("--descent-m", type=float,
                         help="object-specific measured override; never inferred by room scaling")
     parser.add_argument("--output", type=Path)
@@ -1207,6 +1314,8 @@ def main() -> int:
     report_path = args.output or args.output_dir / f"{args.object}-grasp-report.json"
     try:
         config = load_cycle_config(args.config)
+        venue = load_config(args.venue_config, args.interface_config)
+        config = resolve_cycle_venue_overrides(config, venue)
         descent = float(
             args.descent_m
             if args.descent_m is not None
@@ -1228,8 +1337,6 @@ def main() -> int:
         return 0
 
     try:
-        venue = load_config(args.venue_config)
-        config = resolve_cycle_venue_overrides(config, venue)
         environment, errors = environment_report(venue)
     except Exception as exc:
         write_report({

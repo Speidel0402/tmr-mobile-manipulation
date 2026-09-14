@@ -63,18 +63,20 @@ class SpineControl:
                 return True
         return False
 
-    def _wait(self, future: Any, timeout_s: float) -> Any:
+    def _wait(self, future: Any, timeout_s: float, *, service_heartbeat: bool = True) -> Any:
         import rclpy
 
         deadline = time.monotonic() + timeout_s
         while not future.done() and time.monotonic() < deadline:
-            self._keep_arm_stream_alive()
+            if service_heartbeat:
+                self._keep_arm_stream_alive()
             rclpy.spin_until_future_complete(
                 self.node,
                 future,
                 timeout_sec=min(0.02, max(0.0, deadline - time.monotonic())),
             )
-        self._keep_arm_stream_alive()
+        if service_heartbeat:
+            self._keep_arm_stream_alive()
         if not future.done() or future.result() is None:
             raise TimeoutError("native spine response timed out")
         return future.result()
@@ -123,13 +125,25 @@ class SpineControl:
             raise RuntimeError("native spine goal rejected")
         try:
             wrapped = self._wait(handle.get_result_async(), timeout_s)
-        except TimeoutError:
+        except BaseException:
             try:
-                self._wait(handle.cancel_goal_async(), 5.0)
+                # Cancellation must still reach the action server if the
+                # heartbeat itself caused the original failure. The arm
+                # publisher runs independently of this executor heartbeat.
+                response = self._wait(
+                    handle.cancel_goal_async(), 5.0, service_heartbeat=False
+                )
+                if not response.goals_canceling:
+                    raise RuntimeError("native spine cancellation was not accepted")
             except BaseException as cancel_exc:
-                detail = f"spine timeout cancellation failed: {type(cancel_exc).__name__}: {cancel_exc}"
+                detail = f"spine cancellation failed: {type(cancel_exc).__name__}: {cancel_exc}"
                 self.errors.append(detail)
-                self.node.get_logger().error(detail)
+                try:
+                    self.node.get_logger().error(detail)
+                except BaseException as log_exc:
+                    self.errors.append(
+                        f"spine cancellation logging failed: {type(log_exc).__name__}: {log_exc}"
+                    )
             raise
         from action_msgs.msg import GoalStatus
 

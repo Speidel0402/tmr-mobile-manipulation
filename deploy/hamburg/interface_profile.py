@@ -45,6 +45,12 @@ def load_interface_profile(
         "provenance": "Hamburg organizer-confirmed relative GELLO controller semantics",
     })
     profile["arm_motion"].setdefault("joint_feedback_stale_timeout_s", 1.0)
+    # Older copied profiles also need the override binding, otherwise the new
+    # environment setting is silently ignored even though its field exists.
+    profile.setdefault("environment_overrides", {}).setdefault(
+        "TMR_HAMBURG_ARM_JOINT_FEEDBACK_STALE_TIMEOUT_S",
+        "arm_motion.joint_feedback_stale_timeout_s",
+    )
     environ = os.environ if environment is None else environment
     applied = {}
     for name, dotted_path in profile.get("environment_overrides", {}).items():

@@ -8,7 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from hamburg_grasp_cycle import validate_motion_config
+from hamburg_grasp_cycle import load_cycle_config, validate_motion_config
+from hamburg_mission import validate_mission_config
 
 
 HERE = Path(__file__).resolve().parent
@@ -47,8 +48,13 @@ def main() -> int:
     parser.add_argument("--joint-feedback-stale-timeout-s", type=float)
     args = parser.parse_args()
 
-    mission = json.loads(args.mission_template.read_text(encoding="utf-8"))
-    grasp = json.loads(args.grasp_template.read_text(encoding="utf-8"))
+    try:
+        mission = json.loads(args.mission_template.read_text(encoding="utf-8"))
+        # Use the runtime loader so saved configs from earlier Hamburg trials
+        # gain the same backward-compatible defaults as physical entrypoints.
+        grasp = load_cycle_config(args.grasp_template)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        parser.error(f"cannot load site templates: {exc}")
     measurements = mission["hamburg_measurements"]
     for argument, key in (
         (args.room_length_m, "room_length_m"), (args.room_width_m, "room_width_m"),
@@ -97,6 +103,7 @@ def main() -> int:
         parser.error("--spine-m must be between 0.0 and 0.8")
     try:
         validate_motion_config(grasp["motion"])
+        validate_mission_config(mission)
     except (KeyError, TypeError, ValueError) as exc:
         parser.error(str(exc))
     mission["profile_name"] = "hamburg_site_override"

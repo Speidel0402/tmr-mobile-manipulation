@@ -30,9 +30,19 @@ GELLO topic.
 The earlier constant following error came from treating this relative interface
 as absolute. The following-error guard, catch-up behavior, feedback-age check
 and final target tolerance remain active after the encoding correction. Arm
-publishing runs independently from input callback servicing, and the measured
-feedback-age limit is now a bounded venue setting. No speed or trajectory-timing
-override is required for the first retry.
+publishing uses a separate worker, input callbacks are serviced in bounded
+batches, and the measured feedback-age limit is a bounded venue setting. Keep
+the original speed settings for the first retry. Startup image decoding and
+vision processing now refresh feedback before checking its age; the JSON also
+records input-service gaps and publication timing for any remaining stalls.
+
+The native entrypoints default this process to Fast DDS asynchronous publication
+before ROS initialization. This keeps DDS sending off the calling thread while
+preserving domain 0, reliable arm commands and the venue UDP-only XML. Explicit
+`RMW_FASTRTPS_PUBLICATION_MODE` settings are preserved. If
+`RMW_FASTRTPS_USE_QOS_FROM_XML=1`, the XML controls publication mode instead;
+`check` reports that precedence so a synchronous XML setting is not mistaken for
+an asynchronous one. No scheduler priority change is required by this update.
 
 Place the cup, bowl and plate in the normal pickup arrangement, then manually
 place the stopped robot beside the pickup table with clear arm workspace. Run
@@ -56,6 +66,12 @@ base:
       --output /tmp/bowl-grasp.json --output-dir /tmp/bowl-evidence
     ./deploy/hamburg/run_hamburg.sh grasp-test --object plate --execute \
       --output /tmp/plate-grasp.json --output-dir /tmp/plate-evidence
+
+If using a copied interface profile, pass the same `--interface-config <path>`
+to `check`, `pickup-reset`, `grasp-test` and `mission`. Plans without `--execute`
+now resolve the same profile and environment overrides as execution.
+Keep motion adjustments in the grasp/mission configuration or documented
+environment overrides; `--interface-config` selects the endpoint conventions.
 
 If all three pass, return the robot to the official Hamburg start, then inspect
 and run the full loop including base navigation, grasp, letter observation,

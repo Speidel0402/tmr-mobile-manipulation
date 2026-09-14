@@ -67,11 +67,45 @@ def fastdds_profile_report(path: Path) -> tuple[dict[str, Any], list[str]]:
     }, errors
 
 
+def configure_native_publication(
+    environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Configure this process before ROS initialization, preserving venue choices.
+
+    Humble's synchronous rcl_publish can hold Python's GIL during DDS sends.
+    Async mode moves sending to DDS; XML QoS, when enabled, still takes priority.
+    """
+    environ = os.environ if environment is None else environment
+    if not environ.get("RMW_FASTRTPS_PUBLICATION_MODE", "").strip():
+        environ["RMW_FASTRTPS_PUBLICATION_MODE"] = "ASYNCHRONOUS"
+    xml_override = environ.get("RMW_FASTRTPS_USE_QOS_FROM_XML") == "1"
+    mode = environ["RMW_FASTRTPS_PUBLICATION_MODE"]
+    warnings = []
+    if xml_override:
+        warnings.append(
+            "RMW_FASTRTPS_USE_QOS_FROM_XML=1: publication mode comes from the "
+            "venue XML; the ASYNCHRONOUS environment setting does not override it"
+        )
+    elif mode != "ASYNCHRONOUS":
+        warnings.append(
+            f"preserving publication mode {mode!r}; synchronous DDS sends may delay callbacks"
+        )
+    return {
+        "requested_mode": mode,
+        "mode_source": "venue_xml" if xml_override else "environment",
+        "warnings": warnings,
+    }
+
+
 def environment_report(config: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    publication = configure_native_publication()
     expected = config["dds"]
     actual = {
         key: os.environ.get(key)
-        for key in ("ROS_DOMAIN_ID", "ROS_LOCALHOST_ONLY", "RMW_IMPLEMENTATION")
+        for key in (
+            "ROS_DOMAIN_ID", "ROS_LOCALHOST_ONLY", "RMW_IMPLEMENTATION",
+            "RMW_FASTRTPS_PUBLICATION_MODE", "RMW_FASTRTPS_USE_QOS_FROM_XML",
+        )
     }
     profile_key = expected["profile_environment_variable"]
     profile_value = os.environ.get(profile_key)
@@ -138,6 +172,7 @@ def environment_report(config: dict[str, Any]) -> tuple[dict[str, Any], list[str
         "python": python_version,
         "free_disk_gb": round(free_gb, 3),
         "fastdds_profile": profile_report,
+        "publication": publication,
     }, errors
 
 

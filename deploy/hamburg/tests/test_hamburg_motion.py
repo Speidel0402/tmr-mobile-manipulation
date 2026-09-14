@@ -185,7 +185,7 @@ class HamburgMotionTests(unittest.TestCase):
         fake_rclpy = mock.Mock()
         with mock.patch.dict(sys.modules, {"rclpy": fake_rclpy}), \
                 mock.patch("hamburg_grasp_cycle.time.monotonic",
-                           side_effect=[0.0, 0.0, 0.0, 0.0, 0.2]), \
+                           side_effect=[0.0, 0.0, 0.0, 0.0, 0.0, 0.2]), \
                 mock.patch("hamburg_grasp_cycle.time.sleep"):
             runner.spin_for(0.1)
 
@@ -236,6 +236,7 @@ class HamburgMotionTests(unittest.TestCase):
                 runner.images.append((1, object()))
 
         runner.spin_for = spin
+        runner.service_input_callbacks = mock.Mock()
         with mock.patch("hamburg_grasp_cycle.decode_wrist_rgb", return_value=object()):
             runner.wait_live(0.5)
 
@@ -251,11 +252,18 @@ class HamburgMotionTests(unittest.TestCase):
         runner.states = {"left": [0.1] * 7, "right": [0.2] * 7}
         runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
         runner.last_arm_publish_at = 0.0
+        runner.arm_publications = {"left": None, "right": None}
         runner.publish_arm_holds = mock.Mock()
 
         def neutral_spin(duration):
             runner.publish_arm_holds()
             runner.last_arm_publish_at = time.monotonic()
+            for arm in ("left", "right"):
+                previous = runner.arm_publications[arm]
+                runner.arm_publications[arm] = {
+                    "first_completed_at": previous["first_completed_at"] if previous else time.monotonic(),
+                    "completed_at": time.monotonic(),
+                }
             runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
             time.sleep(duration)
 
@@ -276,8 +284,166 @@ class HamburgMotionTests(unittest.TestCase):
             runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
 
         runner.spin_for = drifting_spin
+        runner.states["right"][0] += 0.02
         with self.assertRaisesRegex(RuntimeError, "controller inactive"):
             runner.synchronize_arm_command_interface()
+
+    def test_slow_startup_decode_refreshes_feedback_before_guard(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.config["motion"]["joint_feedback_stale_timeout_s"] = 0.5
+        runner.states = {"left": list(self.q), "right": list(self.q)}
+        runner.state_times = {"left": 0.0, "right": 0.0}
+        runner.gripper_samples = deque([(1.0, [0.04, 0.04])])
+        runner.images = deque([(1, object())])
+        clock = [10.0]
+
+        def refresh(*_args):
+            runner.state_times = {"left": clock[0], "right": clock[0]}
+
+        def slow_decode(_image):
+            clock[0] += 0.65
+            return object()
+
+        runner.spin_for = refresh
+        runner.service_input_callbacks = mock.Mock(side_effect=refresh)
+        with mock.patch("hamburg_grasp_cycle.time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("hamburg_grasp_cycle.decode_wrist_rgb", side_effect=slow_decode):
+            runner.wait_live(1.0)
+        runner.service_input_callbacks.assert_called_once()
+        self.assertAlmostEqual(runner.startup_wrist_decode_duration_s, 0.65)
+        self.assertEqual(runner.state_times["left"], clock[0])
+
+    def test_delayed_publisher_does_not_skip_joint_ramp_points(self) -> None:
+        class JointState:
+            def __init__(self):
+                self.header = mock.Mock()
+
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        q = list(self.grasp["posture"]["right_parking_rad"])
+        target = list(q)
+        target[0] += 0.012
+        runner.commanded = {"left": list(q), "right": list(q)}
+        runner.states = {"left": list(q), "right": list(q)}
+        runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+        runner.robot_activation_reference = {"left": list(q), "right": list(q)}
+        runner.input_activation_reference = {"left": list(q), "right": list(q)}
+        runner.last_published_arm_input = {"left": None, "right": None}
+        now = time.monotonic()
+        runner.arm_publications = {
+            arm: {"robot_target": list(q), "completed_at": now, "first_completed_at": now,
+                  "count": 1, "duration_s": 0.0, "maximum_duration_s": 0.0, "maximum_gap_s": 0.0}
+            for arm in ("left", "right")
+        }
+        runner.arm_publish_lock = threading.RLock()
+        runner.arm_keepalive_stop = threading.Event()
+        runner.arm_keepalive_error = None
+        runner.last_arm_publish_at = 0.0
+        runner.arm_publish_count = 0
+        runner.following_lag_events = deque(maxlen=30)
+        runner.JointState = JointState
+        runner.node = mock.Mock()
+        published = []
+        direction = self.grasp["arm_command_interface"]["direction"]
+
+        def slow_publish(arm, message):
+            time.sleep(0.015)
+            robot = [q[i] + direction[i] * (message.position[i] - q[i]) for i in range(7)]
+            runner.states[arm] = robot
+            if arm == "right":
+                published.append(robot)
+
+        runner.arm_publishers = {
+            arm: mock.Mock(publish=lambda message, arm=arm: slow_publish(arm, message))
+            for arm in ("left", "right")
+        }
+
+        def callbacks():
+            runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+
+        runner.service_input_callbacks = callbacks
+        runner.move_arm_targets = mock.Mock()
+        runner.arm_keepalive_thread = threading.Thread(target=runner._arm_keepalive_loop, daemon=True)
+        runner.arm_keepalive_thread.start()
+        try:
+            runner.move_to_joint_posture("right", target)
+        finally:
+            runner.stop_arm_keepalive()
+        expected = smooth_joint_targets(q, target, 50.0, self.grasp["motion"]["posture_joint_velocity_rad_s"])
+        for point in expected:
+            self.assertTrue(any(np.allclose(point, sent, atol=1e-12, rtol=0) for sent in published))
+        actual_steps = np.diff(np.vstack([q, *published]), axis=0)
+        self.assertLessEqual(float(np.max(np.abs(actual_steps))),
+                             self.grasp["motion"]["posture_joint_velocity_rad_s"] / 50.0 + 1e-12)
+        self.assertGreater(runner.arm_publications["right"]["maximum_duration_s"], 0.01)
+
+    def test_missing_publisher_acknowledgement_times_out(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.config["motion"]["joint_feedback_stale_timeout_s"] = 0.01
+        runner.arm_publications = {"left": None, "right": None}
+        runner.arm_keepalive_error = None
+        runner.service_input_callbacks = mock.Mock()
+        runner._check_all_following = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, "target publication timed out"):
+            runner._wait_for_arm_publication("right", list(self.q))
+        self.assertGreater(runner.service_input_callbacks.call_count, 0)
+
+    def test_healthy_publication_adds_no_extra_control_tick(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = self.grasp
+        runner.commanded = {"left": list(self.q), "right": list(self.q)}
+        runner.states = {"left": list(self.q), "right": list(self.q)}
+        runner.arm_publications = {"left": None, "right": None}
+        runner.arm_keepalive_error = None
+        runner._check_all_following = mock.Mock()
+        runner.move_arm_targets = mock.Mock()
+        periods = []
+
+        def spin(duration):
+            periods.append(duration)
+            runner.arm_publications["left"] = {"robot_target": list(runner.commanded["left"])}
+
+        runner.spin_for = spin
+        target = list(self.q)
+        target[0] += 0.012
+        with mock.patch("hamburg_grasp_cycle.time.sleep") as sleep:
+            runner.move_to_joint_posture("left", target)
+        expected = smooth_joint_targets(self.q, target, 50.0,
+                                        self.grasp["motion"]["posture_joint_velocity_rad_s"])
+        self.assertEqual(periods, [0.02] * len(expected))
+        sleep.assert_not_called()
+
+    def test_neutral_sync_requires_publication_for_both_arms(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = deepcopy(self.grasp)
+        runner.config["motion"]["joint_feedback_stale_timeout_s"] = 0.01
+        runner.states = {"left": list(self.q), "right": list(self.q)}
+        runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+        runner.arm_publications = {"left": {"first_completed_at": time.monotonic()}, "right": None}
+
+        def refresh(_duration):
+            runner.state_times = {"left": time.monotonic(), "right": time.monotonic()}
+
+        runner.spin_for = refresh
+        with self.assertRaisesRegex(RuntimeError, "not published for both arms"):
+            runner.synchronize_arm_command_interface()
+
+    def test_fresh_static_feedback_does_not_mask_stalled_arm_publication(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = self.grasp
+        now = time.monotonic()
+        runner.states = {"left": list(self.q), "right": list(self.q)}
+        runner.commanded = {"left": list(self.q), "right": list(self.q)}
+        runner.state_times = {"left": now, "right": now}
+        runner.arm_command_sync = {"status": "neutral_stream_established"}
+        runner.arm_publications = {
+            "left": {"completed_at": now},
+            "right": {"completed_at": now - 1.2},
+        }
+        with self.assertRaisesRegex(RuntimeError, "right arm command publication became stale"):
+            runner._check_all_following()
 
     def test_previous_grasp_config_gains_safe_lag_defaults(self) -> None:
         legacy = json.loads(
@@ -509,12 +675,40 @@ class HamburgMotionTests(unittest.TestCase):
             runner.images.append((calls + 1, object()))
 
         runner.spin_for = spin
+        runner.service_input_callbacks = mock.Mock()
         expected = np.zeros((480, 640, 3), dtype=np.uint8)
         with mock.patch("hamburg_grasp_cycle.decode_wrist_rgb",
                         side_effect=[ValueError("bad encoding"), expected]):
             actual = runner.fresh_wrist_bgr(timeout_s=0.5)
         self.assertIs(actual, expected)
         self.assertEqual(calls, 2)
+
+    def test_wrist_detection_uses_latest_frame_and_services_after_each_decode(self) -> None:
+        runner = NativeArmGraspCycle.__new__(NativeArmGraspCycle)
+        runner.config = self.grasp
+        runner.images = deque([(0, 0)], maxlen=20)
+        runner._check_all_following = mock.Mock()
+        events = []
+        stamp = [0]
+
+        def spin(_duration):
+            for _ in range(2):
+                stamp[0] += 1
+                runner.images.append((stamp[0], stamp[0]))
+
+        def detect(_name, bgr):
+            events.append(("detect", bgr))
+            return (100.0, 200.0)
+
+        runner.spin_for = spin
+        runner.service_input_callbacks = lambda: events.append(("service",))
+        with mock.patch("hamburg_grasp_cycle.decode_wrist_rgb", side_effect=lambda frame: frame), \
+                mock.patch("hamburg_grasp_cycle.detect_object", side_effect=detect):
+            point, image = runner.stable_detection("cup", timeout_s=1.0)
+        self.assertEqual(point, (100.0, 200.0))
+        self.assertEqual(image, 10)
+        self.assertEqual(events, [item for frame in (2, 4, 6, 8, 10)
+                                  for item in (("detect", frame), ("service",))])
 
     def test_runtime_profiles_must_match_resolved_venue_interfaces(self) -> None:
         venue = load_config(ROOT / "config" / "venue.json")

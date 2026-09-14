@@ -54,7 +54,9 @@ neutral input. Start the physical entrypoint with the arm controllers inactive
 or ready to activate so they capture that neutral sample. The same input is
 kept alive by a dedicated lightweight publisher that fills gaps while the
 spine action, image processing, IK, evidence writing, gripper and base work
-run; the normal trajectory rate is unchanged. Hamburg reports that a stale
+run. The normal trajectory rate is unchanged; if publication is delayed, the
+ramp waits for its current point to be published before advancing instead of
+skipping points. Hamburg reports that a stale
 GELLO stream zeroes torque and stops the controller. If an
 arm moves during neutral synchronization, the run stops before the parking
 trajectory and reports that the controller must be reactivated with the neutral
@@ -68,6 +70,20 @@ constructs all subscriptions, publishers, action clients, and service clients
 before active motion. A gap-filling publisher keeps arm hold targets flowing
 while the base, vision, IK, evidence, and gripper work runs. No phase starts a
 child process or creates a new DDS participant.
+
+Input callbacks are drained in bounded batches, including after startup image
+decoding and vision work. Vision control uses the latest available frame rather
+than processing a backlog. The feedback-age guard defaults to `1.0 s` and remains
+active; diagnostics include input-service gaps and publication timing.
+
+Before ROS initialization the native entrypoints default
+`RMW_FASTRTPS_PUBLICATION_MODE` to `ASYNCHRONOUS`, preserving an explicit venue
+setting. This is supported by
+[ROS Humble rmw_fastrtps](https://github.com/ros2/rmw_fastrtps/tree/humble#change-publication-mode)
+and does not change the venue transport XML. With
+`RMW_FASTRTPS_USE_QOS_FROM_XML=1`, publication mode comes from XML instead;
+the environment report identifies this precedence. A Python publisher thread
+alone cannot guarantee isolation from a blocking native DDS call.
 
 ## Camera resolution and coordinates
 
@@ -131,6 +147,15 @@ timing. If the controller remains slower, lower the posture velocity before
 increasing the hard limit again. Every
 applied environment override and every lag/recovery event is included in the
 JSON report.
+
+When using a copied interface JSON, pass the same `--interface-config <path>`
+to the check and all physical entrypoints. Their dry plans resolve the same
+configuration as execution. Old copied grasp/interface files receive the new
+feedback-age default and its environment override mapping automatically.
+The interface file describes endpoints and their conventions; it does not
+replace motion values in a copied grasp/mission file. Use `site-config`, the
+grasp/mission JSON, or the documented environment overrides for motion tuning.
+Duplicated interface conventions must agree across the files.
 
 ## Run order
 

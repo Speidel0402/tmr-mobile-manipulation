@@ -16,7 +16,9 @@ The shared reset/grasp/mission controller also now:
 
 - services incoming callbacks in bounded batches while maintaining the arm
   stream; the feedback-age limit is configurable and defaults to `1.0 s`, so the
-  reported `0.501–0.613 s` ages alone no longer trip a hardcoded `0.5 s` guard;
+  reported `0.501–0.613 s` ages alone no longer trip a hardcoded `0.5 s` guard.
+  A measured venue override is available through
+  `TMR_HAMBURG_ARM_JOINT_FEEDBACK_STALE_TIMEOUT_S`;
 - defaults this process to asynchronous Fast DDS publication before ROS
   initialization, while preserving explicit venue settings and reporting when
   XML QoS takes precedence;
@@ -24,15 +26,20 @@ The shared reset/grasp/mission controller also now:
   advancing if publication is delayed, and monitors publication continuity
   during the later phases as well;
 - processes the newest camera frame instead of a backlog, checks arm feedback
-  during base motion, and cancels an accepted spine action when its wait fails
-  or is interrupted;
+  during base motion, and requests cancellation of the same spine goal if the
+  acknowledgement or result wait fails or is interrupted, recording cancellation
+  failures separately;
+- detects competing command publishers even when another process uses the same
+  node name;
 - records per-arm publication timing, input-service gaps, startup decode timing,
-  the failed phase, and original plus recovery/cleanup errors.
+  the failed phase, and original plus recovery/cleanup errors. Diagnostic
+  collection failures also no longer prevent cleanup or the final error report.
 
 The original Shanghai poses, wrist calibration, object parameters, relative
 GELLO direction map and normal motion speeds remain unchanged. Neutral streaming
-still precedes controller activation. Old copied configuration files remain
-supported, and plans now resolve the same explicit overrides as execution.
+still precedes controller activation. Copied configurations from the previous
+`b215b17` trial receive the new feedback-age default and override binding, and
+plans now resolve the same explicit overrides as execution.
 
 We also restored executable permission on `run_hamburg.sh`. In each new terminal,
 please source `/opt/ros/humble/setup.bash`, then the Hamburg testbed workspace
@@ -65,7 +72,7 @@ cannot be handled by assuming generalization or applying one global scale.
 The [Shanghai test video](https://github.com/Speidel0402/tmr-mobile-manipulation/releases/download/stage1-pre-submission/ebim-task3-phase2-stage1-official-test.mp4)
 shows the original placement arrangement.
 
-Local validation passed 67 Hamburg regression tests and 229 existing base,
+Local validation passed 72 Hamburg regression tests and 229 existing base,
 grasp and mission tests, plus Python compilation and lint checks. These cover
 delayed decoding/publication, activation sync, configuration compatibility and
 exception handling. Hamburg hardware execution

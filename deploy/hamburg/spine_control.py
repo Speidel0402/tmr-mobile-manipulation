@@ -120,21 +120,30 @@ class SpineControl:
         goal.velocity = float(velocity_mps)
         goal.acceleration = 0.1
         goal.deceleration = 0.1
-        handle = self._wait(self.action_client.send_goal_async(goal), 5.0)
-        if not handle.accepted:
-            raise RuntimeError("native spine goal rejected")
+        send_future = self.action_client.send_goal_async(goal)
+        handle = None
         try:
+            handle = self._wait(send_future, 5.0)
+            if not handle.accepted:
+                raise RuntimeError("native spine goal rejected")
             wrapped = self._wait(handle.get_result_async(), timeout_s)
         except BaseException:
             try:
+                # The server may already have accepted the goal even if a
+                # heartbeat or interrupt prevented receiving its handle.
+                # Resolve only this request, with a bounded wait, so cleanup
+                # cannot cancel another client's spine goal.
+                if handle is None:
+                    handle = self._wait(send_future, 5.0, service_heartbeat=False)
                 # Cancellation must still reach the action server if the
                 # heartbeat itself caused the original failure. The arm
                 # publisher runs independently of this executor heartbeat.
-                response = self._wait(
-                    handle.cancel_goal_async(), 5.0, service_heartbeat=False
-                )
-                if not response.goals_canceling:
-                    raise RuntimeError("native spine cancellation was not accepted")
+                if handle.accepted:
+                    response = self._wait(
+                        handle.cancel_goal_async(), 5.0, service_heartbeat=False
+                    )
+                    if not response.goals_canceling:
+                        raise RuntimeError("native spine cancellation was not accepted")
             except BaseException as cancel_exc:
                 detail = f"spine cancellation failed: {type(cancel_exc).__name__}: {cancel_exc}"
                 self.errors.append(detail)

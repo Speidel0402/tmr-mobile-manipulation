@@ -24,6 +24,7 @@ import numpy as np
 
 from hamburg_grasp_cycle import (
     NativeArmGraspCycle,
+    competing_command_publishers,
     load_cycle_config,
     resolve_cycle_venue_overrides,
     write_report,
@@ -386,10 +387,7 @@ class NativeBaseControl:
                 raise
 
     def wait_ready(self, timeout_s: float = 12.0) -> None:
-        external = [
-            info for info in self.node.get_publishers_info_by_topic(self.config["topics"]["base_command"])
-            if info.node_name != self.node.get_name()
-        ]
+        external = competing_command_publishers(self.node, self.config["topics"]["base_command"])
         if external:
             owners = sorted({f"{info.node_namespace}/{info.node_name}" for info in external})
             raise RuntimeError(f"competing base command publisher: {owners}")
@@ -1082,11 +1080,19 @@ def main() -> int:
             except Exception as stop_exc:
                 cleanup_errors.append(f"base_stop: {type(stop_exc).__name__}: {stop_exc}")
                 report["zero_base_command_latched"] = False
-            report["base_diagnostics"] = base.diagnostic_snapshot()
-        if mission_runner is not None:
-            report["arm_diagnostics"] = mission_runner.arm.diagnostic_snapshot()
-        if spine is not None:
-            report["spine_diagnostics"] = spine.diagnostic_snapshot()
+        for label, snapshot in (
+            ("base_diagnostics", base.diagnostic_snapshot if base is not None else None),
+            ("arm_diagnostics", arm.diagnostic_snapshot if arm is not None else None),
+            ("spine_diagnostics", spine.diagnostic_snapshot if spine is not None else None),
+        ):
+            if snapshot is None:
+                continue
+            try:
+                report[label] = snapshot()
+            except Exception as diagnostic_exc:
+                report.setdefault("diagnostic_errors", []).append(
+                    f"{label}: {type(diagnostic_exc).__name__}: {diagnostic_exc}"
+                )
         for label, operation in (
             (
                 "arm_keepalive_stop",

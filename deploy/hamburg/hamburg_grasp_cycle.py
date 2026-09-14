@@ -47,6 +47,19 @@ DEFAULT_GELLO_DIRECTION = [-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0]
 INPUT_CALLBACK_SPIN_BUDGET = 16
 
 
+def competing_command_publishers(node: Any, topic: str) -> list[Any]:
+    """Exclude at most one local endpoint, preserving duplicate-name conflicts."""
+    own_identity = (node.get_namespace(), node.get_name())
+    own_seen = False
+    competing = []
+    for info in node.get_publishers_info_by_topic(topic):
+        if (info.node_namespace, info.node_name) == own_identity and not own_seen:
+            own_seen = True
+        else:
+            competing.append(info)
+    return competing
+
+
 def encode_arm_command(
     robot_target: list[float],
     robot_at_activation: list[float],
@@ -509,9 +522,11 @@ class NativeArmGraspCycle:
                 delay = max(0.001, period - (time.monotonic() - last_publish))
             if self.arm_keepalive_stop.wait(delay):
                 return
-            # This thread owns normal arm publication.  Keeping the potentially
-            # blocking DDS publish away from the executor loop prevents all
-            # inbound callbacks from aging together on a slow publish call.
+            # This thread owns normal arm publication, so the input executor
+            # never waits on its Python publication lock.  Native asynchronous
+            # DDS configuration reduces transport blocking; publication gaps
+            # are still monitored because the Python thread alone cannot
+            # isolate a native call that retains the GIL.
             last_publish = self.last_arm_publish_at
             if (
                 last_publish > 0.0
@@ -717,10 +732,7 @@ class NativeArmGraspCycle:
             counts[key] = count
             if require_subscribers and count < 1:
                 raise RuntimeError(f"no controller subscribes to {topics[key]}")
-            external = [
-                info for info in self.node.get_publishers_info_by_topic(topics[key])
-                if info.node_name != self.node.get_name()
-            ]
+            external = competing_command_publishers(self.node, topics[key])
             if external:
                 owners = sorted({f"{info.node_namespace}/{info.node_name}" for info in external})
                 raise RuntimeError(f"competing command publisher on {topics[key]}: {owners}")
@@ -1410,10 +1422,18 @@ def main() -> int:
             report.setdefault("cleanup_errors", []).extend(cleanup_errors)
             if report.get("status") == "passed":
                 report["status"] = "failed_cleanup"
-        if runner is not None:
-            report["final_diagnostics"] = runner.diagnostic_snapshot()
-        if spine is not None:
-            report["spine_diagnostics"] = spine.diagnostic_snapshot()
+        for label, snapshot in (
+            ("final_diagnostics", runner.diagnostic_snapshot if runner is not None else None),
+            ("spine_diagnostics", spine.diagnostic_snapshot if spine is not None else None),
+        ):
+            if snapshot is None:
+                continue
+            try:
+                report[label] = snapshot()
+            except Exception as diagnostic_exc:
+                report.setdefault("diagnostic_errors", []).append(
+                    f"{label}: {type(diagnostic_exc).__name__}: {diagnostic_exc}"
+                )
     write_report(report, report_path)
     return 0 if report.get("status") == "passed" else 2
 

@@ -135,6 +135,55 @@ class MissionRuntimeTests(unittest.TestCase):
 
 
 class SpineCancellationTests(unittest.TestCase):
+    def test_missing_acknowledgement_records_unresolved_cancellation_without_resending(self) -> None:
+        controller = SpineControl.__new__(SpineControl)
+        controller.profile = {"minimum_m": 0.0, "maximum_m": 1.0}
+        controller.position = lambda: 0.5
+        controller._wait_for_endpoint = lambda *_: True
+        controller.action_type = SimpleNamespace(Goal=SimpleNamespace)
+        controller.errors = []
+        controller.node = mock.Mock()
+        controller.action_client = mock.Mock()
+        original = RuntimeError("heartbeat failed after send")
+        controller._wait = mock.Mock(side_effect=[original, TimeoutError("acknowledgement unavailable")])
+        with self.assertRaises(RuntimeError) as raised:
+            controller.move_absolute(0.7)
+        self.assertIs(raised.exception, original)
+        controller.action_client.send_goal_async.assert_called_once()
+        self.assertEqual(controller._wait.call_count, 2)
+        self.assertEqual(controller._wait.call_args.args[1], 5.0)
+        self.assertFalse(controller._wait.call_args.kwargs["service_heartbeat"])
+        self.assertIn("acknowledgement unavailable", controller.errors[0])
+
+    def test_acknowledged_goal_is_cancelled_when_heartbeat_or_interrupt_hides_handle(self) -> None:
+        for original in (RuntimeError("heartbeat failed after send"), KeyboardInterrupt()):
+            with self.subTest(error=type(original).__name__):
+                controller = SpineControl.__new__(SpineControl)
+                controller.profile = {"minimum_m": 0.0, "maximum_m": 1.0}
+                controller.position = lambda: 0.5
+                controller._wait_for_endpoint = lambda *_: True
+                controller.action_type = SimpleNamespace(Goal=SimpleNamespace)
+                controller.errors = []
+                controller.node = mock.Mock()
+
+                def completed(value):
+                    return SimpleNamespace(done=lambda: True, result=lambda: value)
+
+                handle = mock.Mock(accepted=True)
+                handle.cancel_goal_async.return_value = completed(SimpleNamespace(goals_canceling=[1]))
+                controller.action_client = SimpleNamespace(
+                    wait_for_server=None, send_goal_async=mock.Mock(return_value=completed(handle))
+                )
+                controller._keep_arm_stream_alive = mock.Mock(side_effect=original)
+                with mock.patch.dict(sys.modules, {"rclpy": SimpleNamespace()}):
+                    with self.assertRaises(type(original)) as raised:
+                        controller.move_absolute(0.7)
+                self.assertIs(raised.exception, original)
+                controller.action_client.send_goal_async.assert_called_once()
+                handle.get_result_async.assert_not_called()
+                handle.cancel_goal_async.assert_called_once()
+                self.assertEqual(controller.errors, [])
+
     def test_cancellation_logging_failure_preserves_original_error(self) -> None:
         controller = SpineControl.__new__(SpineControl)
         controller.profile = {"minimum_m": 0.0, "maximum_m": 1.0}
